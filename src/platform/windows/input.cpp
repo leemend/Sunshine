@@ -9,6 +9,7 @@
 
 // standard includes
 #include <cmath>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -20,8 +21,10 @@
 #include "misc.h"
 #include "src/config.h"
 #include "src/globals.h"
+#include "src/input.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "teknoparrot_pipe.h"
 
 namespace platf {
   using namespace std::literals;
@@ -454,9 +457,19 @@ namespace platf {
     }
 
     // Get pointers to virtual touch/pen input functions (Win10 1809+)
-    raw.fnCreateSyntheticPointerDevice = (decltype(CreateSyntheticPointerDevice) *) GetProcAddress(GetModuleHandleA("user32.dll"), "CreateSyntheticPointerDevice");
-    raw.fnInjectSyntheticPointerInput = (decltype(InjectSyntheticPointerInput) *) GetProcAddress(GetModuleHandleA("user32.dll"), "InjectSyntheticPointerInput");
-    raw.fnDestroySyntheticPointerDevice = (decltype(DestroySyntheticPointerDevice) *) GetProcAddress(GetModuleHandleA("user32.dll"), "DestroySyntheticPointerDevice");
+    // LoadLibraryA (not GetModuleHandleA) guarantees user32.dll is actually loaded here,
+    // rather than merely checking whether something else has already loaded it - safe/cheap to
+    // call even if it's already loaded (just increments the refcount).
+    auto user32 = LoadLibraryA("user32.dll");
+    raw.fnCreateSyntheticPointerDevice = (decltype(CreateSyntheticPointerDevice) *) GetProcAddress(user32, "CreateSyntheticPointerDevice");
+    raw.fnInjectSyntheticPointerInput = (decltype(InjectSyntheticPointerInput) *) GetProcAddress(user32, "InjectSyntheticPointerInput");
+    raw.fnDestroySyntheticPointerDevice = (decltype(DestroySyntheticPointerDevice) *) GetProcAddress(user32, "DestroySyntheticPointerDevice");
+
+    teknoparrot_pipe::debug_log(
+      "Synthetic pointer fn resolution: Create=" + std::to_string(raw.fnCreateSyntheticPointerDevice != nullptr) +
+      " Inject=" + std::to_string(raw.fnInjectSyntheticPointerInput != nullptr) +
+      " Destroy=" + std::to_string(raw.fnDestroySyntheticPointerDevice != nullptr)
+    );
 
     return result;
   }
@@ -522,6 +535,11 @@ namespace platf {
     mi.dy = scaled_y;
 
     send_input(i);
+
+    if (auto player = ::input::get_active_player()) {
+      teknoparrot_pipe::debug_log("abs_mouse -> player " + std::to_string(player) + " x=" + std::to_string(scaled_x) + " y=" + std::to_string(scaled_y));
+      teknoparrot_pipe::send_abs_position(player, (int32_t) scaled_x, (int32_t) scaled_y);
+    }
   }
 
   void move_mouse(input_t &input, int deltaX, int deltaY) {
@@ -535,6 +553,11 @@ namespace platf {
     mi.dy = deltaY;
 
     send_input(i);
+
+    if (auto player = ::input::get_active_player()) {
+      teknoparrot_pipe::debug_log("move_mouse -> player " + std::to_string(player) + " dx=" + std::to_string(deltaX) + " dy=" + std::to_string(deltaY));
+      teknoparrot_pipe::send_mouse_move(player, deltaX, deltaY);
+    }
   }
 
   util::point_t get_mouse_loc(input_t &input) {
@@ -557,21 +580,33 @@ namespace platf {
     i.type = INPUT_MOUSE;
     auto &mi = i.mi;
 
+    // TeknoParrotUI's RawMouseButton enum ordinal: 0=Left, 1=Right, 2=Middle, 3=Button4, 4=Button5.
+    // Sunshine's own `button` here is 1=Left, 2=Middle, 3=Right, 4/5=X1/X2 -- map accordingly.
+    int tp_button;
     if (button == 1) {
       mi.dwFlags = release ? MOUSEEVENTF_LEFTUP : MOUSEEVENTF_LEFTDOWN;
+      tp_button = 0;
     } else if (button == 2) {
       mi.dwFlags = release ? MOUSEEVENTF_MIDDLEUP : MOUSEEVENTF_MIDDLEDOWN;
+      tp_button = 2;
     } else if (button == 3) {
       mi.dwFlags = release ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_RIGHTDOWN;
+      tp_button = 1;
     } else if (button == 4) {
       mi.dwFlags = release ? MOUSEEVENTF_XUP : MOUSEEVENTF_XDOWN;
       mi.mouseData = XBUTTON1;
+      tp_button = 3;
     } else {
       mi.dwFlags = release ? MOUSEEVENTF_XUP : MOUSEEVENTF_XDOWN;
       mi.mouseData = XBUTTON2;
+      tp_button = 4;
     }
 
     send_input(i);
+
+    if (auto player = ::input::get_active_player()) {
+      teknoparrot_pipe::send_mouse_button(player, tp_button, !release);
+    }
   }
 
   void scroll(input_t &input, int distance) {
@@ -584,6 +619,10 @@ namespace platf {
     mi.mouseData = distance;
 
     send_input(i);
+
+    if (auto player = ::input::get_active_player()) {
+      teknoparrot_pipe::send_mouse_wheel(player, distance);
+    }
   }
 
   void hscroll(input_t &input, int distance) {
@@ -651,6 +690,10 @@ namespace platf {
     }
 
     send_input(i);
+
+    if (auto player = ::input::get_active_player()) {
+      teknoparrot_pipe::send_key(player, modcode, !release);
+    }
   }
 
   struct client_input_raw_t: public client_input_t {
@@ -1762,7 +1805,15 @@ namespace platf {
     }
 
     // We support pen and touch input on Win10 1809+
-    if (GetProcAddress(GetModuleHandleA("user32.dll"), "CreateSyntheticPointerDevice") != nullptr) {
+    // LoadLibraryA guarantees user32.dll is loaded here even if get_capabilities() runs before
+    // anything else in the process has touched user32.dll (e.g. very early during RTSP capability
+    // negotiation, before the input backend itself has initialized).
+    auto pen_touch_proc = GetProcAddress(LoadLibraryA("user32.dll"), "CreateSyntheticPointerDevice");
+    teknoparrot_pipe::debug_log(
+      "get_capabilities(): CreateSyntheticPointerDevice=" + std::to_string(pen_touch_proc != nullptr) +
+      " config::input.native_pen_touch=" + std::to_string(config::input.native_pen_touch)
+    );
+    if (pen_touch_proc != nullptr) {
       if (config::input.native_pen_touch) {
         caps |= platform_caps::pen_touch;
       }
@@ -1773,3 +1824,19 @@ namespace platf {
     return caps;
   }
 }  // namespace platf
+
+namespace teknoparrot_pipe {
+
+  void forward_touch_position(int player, float x, float y) {
+    if (!player) {
+      return;
+    }
+
+    if (!std::isfinite(x) || !std::isfinite(y)) {
+      return;
+    }
+
+    send_abs_position(player, (int32_t) std::lround(x), (int32_t) std::lround(y));
+  }
+
+}  // namespace teknoparrot_pipe

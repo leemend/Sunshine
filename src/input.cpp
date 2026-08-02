@@ -3,6 +3,7 @@
  * @brief Definitions for gamepad, keyboard, and mouse input handling.
  */
 #include <cstdint>
+#include <cstdio>
 extern "C" {
 #include <moonlight-common-c/src/Input.h>
 #include <moonlight-common-c/src/Limelight.h>
@@ -13,6 +14,7 @@ extern "C" {
 #include <chrono>
 #include <cmath>
 #include <list>
+#include <string>
 #include <thread>
 #include <unordered_map>
 
@@ -27,6 +29,10 @@ extern "C" {
 #include "platform/common.h"
 #include "thread_pool.h"
 #include "utility.h"
+
+#ifdef _WIN32
+  #include "platform/windows/teknoparrot_pipe.h"
+#endif
 
 // Win32 WHEEL_DELTA constant
 #ifndef WHEEL_DELTA
@@ -49,6 +55,22 @@ namespace input {
   constexpr auto VKEY_RCONTROL = 0xA3;
   constexpr auto VKEY_MENU = 0x12;
   constexpr auto VKEY_LMENU = 0xA4;
+  /**
+   * @brief Player slot (1-4) currently being processed on this worker thread, or 0 if none.
+   * @details Each queued client packet is fully processed synchronously on a single task_pool
+   * worker thread (see passthrough_next_message()), so a thread_local is safe here: it is set
+   * immediately before calling into platf::*, and cleared once that call chain returns.
+   */
+  thread_local int active_player_index = 0;
+
+  void set_active_player(int player_index) {
+    active_player_index = player_index;
+  }
+
+  int get_active_player() {
+    return active_player_index;
+  }
+
   constexpr auto VKEY_RMENU = 0xA5;
 
   enum class button_state_e {
@@ -193,6 +215,8 @@ namespace input {
 
     int32_t accumulated_vscroll_delta;
     int32_t accumulated_hscroll_delta;
+
+    int player_index = 0;  ///< Player slot (1-4) assigned to this client session for the TeknoParrot identity bridge, 0 if unassigned.
   };
 
   /**
@@ -442,11 +466,15 @@ namespace input {
   }
 
   void passthrough(std::shared_ptr<input_t> &input, PNV_REL_MOUSE_MOVE_PACKET packet) {
+#ifdef _WIN32
+    teknoparrot_pipe::debug_log("REL_MOUSE_MOVE packet arrived, player_index=" + std::to_string(input->player_index) + " mouse_enabled=" + std::to_string(config::input.mouse));
+#endif
     if (!config::input.mouse) {
       return;
     }
 
     input->mouse_left_button_timeout = DISABLE_LEFT_BUTTON_DELAY;
+    set_active_player(input->player_index);
     platf::move_mouse(platf_input, util::endian::big(packet->deltaX), util::endian::big(packet->deltaY));
   }
 
@@ -539,6 +567,9 @@ namespace input {
   }
 
   void passthrough(std::shared_ptr<input_t> &input, PNV_ABS_MOUSE_MOVE_PACKET packet) {
+#ifdef _WIN32
+    teknoparrot_pipe::debug_log("ABS_MOUSE_MOVE packet arrived, player_index=" + std::to_string(input->player_index) + " mouse_enabled=" + std::to_string(config::input.mouse));
+#endif
     if (!config::input.mouse) {
       return;
     }
@@ -585,6 +616,7 @@ namespace input {
       touch_port_dim_y
     };
 
+    set_active_player(input->player_index);
     platf::abs_mouse(platf_input, abs_port, tpcoords->first, tpcoords->second);
   }
 
@@ -624,6 +656,7 @@ namespace input {
           // Already released left button
           return;
         }
+        set_active_player(input->player_index);
         platf::button_mouse(platf_input, BUTTON_LEFT, release);
 
         mouse_press[BUTTON_LEFT] = false;
@@ -638,6 +671,7 @@ namespace input {
       button == BUTTON_RIGHT && !release &&
       input->mouse_left_button_timeout > DISABLE_LEFT_BUTTON_DELAY
     ) {
+      set_active_player(input->player_index);
       platf::button_mouse(platf_input, BUTTON_RIGHT, false);
       platf::button_mouse(platf_input, BUTTON_RIGHT, true);
 
@@ -646,6 +680,7 @@ namespace input {
       return;
     }
 
+    set_active_player(input->player_index);
     platf::button_mouse(platf_input, button, release);
   }
 
@@ -710,7 +745,9 @@ namespace input {
     }
   }
 
-  void send_key_and_modifiers(uint16_t key_code, bool release, uint8_t flags, uint8_t synthetic_modifiers) {
+  void send_key_and_modifiers(uint16_t key_code, bool release, uint8_t flags, uint8_t synthetic_modifiers, int player_index) {
+    set_active_player(player_index);
+
     if (!release) {
       // Press any synthetic modifiers required for this key
       if (synthetic_modifiers & MODIFIER_SHIFT) {
@@ -740,16 +777,16 @@ namespace input {
     }
   }
 
-  void repeat_key(uint16_t key_code, uint8_t flags, uint8_t synthetic_modifiers) {
+  void repeat_key(uint16_t key_code, uint8_t flags, uint8_t synthetic_modifiers, int player_index) {
     // If key no longer pressed, stop repeating
     if (!key_press[make_kpid(key_code, flags)]) {
       key_press_repeat_id = nullptr;
       return;
     }
 
-    send_key_and_modifiers(key_code, false, flags, synthetic_modifiers);
+    send_key_and_modifiers(key_code, false, flags, synthetic_modifiers, player_index);
 
-    key_press_repeat_id = task_pool.pushDelayed(repeat_key, config::input.key_repeat_period, key_code, flags, synthetic_modifiers).task_id;
+    key_press_repeat_id = task_pool.pushDelayed(repeat_key, config::input.key_repeat_period, key_code, flags, synthetic_modifiers, player_index).task_id;
   }
 
   void passthrough(std::shared_ptr<input_t> &input, PNV_KEYBOARD_PACKET packet) {
@@ -789,7 +826,7 @@ namespace input {
         }
 
         if (config::input.key_repeat_delay.count() > 0) {
-          key_press_repeat_id = task_pool.pushDelayed(repeat_key, config::input.key_repeat_delay, keyCode, packet->flags, synthetic_modifiers).task_id;
+          key_press_repeat_id = task_pool.pushDelayed(repeat_key, config::input.key_repeat_delay, keyCode, packet->flags, synthetic_modifiers, input->player_index).task_id;
         }
       } else {
         // Already released
@@ -802,7 +839,7 @@ namespace input {
 
     pressed = !release;
 
-    send_key_and_modifiers(keyCode, release, packet->flags, synthetic_modifiers);
+    send_key_and_modifiers(keyCode, release, packet->flags, synthetic_modifiers, input->player_index);
 
     update_shortcutFlags(&input->shortcutFlags, map_keycode(keyCode), release);
   }
@@ -817,6 +854,7 @@ namespace input {
       return;
     }
 
+    set_active_player(input->player_index);
     if (config::input.high_resolution_scrolling) {
       platf::scroll(platf_input, util::endian::big(packet->scrollAmt1));
     } else {
@@ -840,6 +878,7 @@ namespace input {
       return;
     }
 
+    set_active_player(input->player_index);
     if (config::input.high_resolution_scrolling) {
       platf::hscroll(platf_input, util::endian::big(packet->scrollAmount));
     } else {
@@ -937,6 +976,26 @@ namespace input {
       return;
     }
 
+#ifdef _WIN32
+    try {
+      // Forward the client's raw normalized touch position directly (0-65535 across its own
+      // touch surface), NOT the touchport-space value computed below. client_to_touchport()'s
+      // output is specifically scaled for inputtino's coordinate expectations (see its comment -
+      // DPI/logical-scaling factors baked in for a different consumer entirely), and applying
+      // abs_mouse()'s scaling on top of that crushes the result down to near-zero rather than
+      // spanning the intended 0-65535 range. The raw client fraction is what TeknoParrotUI's
+      // HandleRawInputGun() actually expects for its moveAbsolute path.
+      teknoparrot_pipe::forward_touch_position(
+        input->player_index,
+        from_clamped_netfloat(packet->x, 0.0f, 1.0f) * 65535.f,
+        from_clamped_netfloat(packet->y, 0.0f, 1.0f) * 65535.f
+      );
+    } catch (...) {
+      // Never let a problem in the TeknoParrot identity bridge take down real input
+      // processing for this session - drop this one forwarded event and continue.
+    }
+#endif
+
     // Convert the client normalized coordinates to touchport coordinates
     auto coords = client_to_touchport(input, {from_clamped_netfloat(packet->x, 0.0f, 1.0f) * 65535.f, from_clamped_netfloat(packet->y, 0.0f, 1.0f) * 65535.f}, {65535.f, 65535.f});
     if (!coords) {
@@ -987,6 +1046,10 @@ namespace input {
     if (!config::input.mouse) {
       return;
     }
+
+#ifdef _WIN32
+    teknoparrot_pipe::debug_log("pen packet received (player_index=" + std::to_string(input->player_index) + ")");
+#endif
 
     // Convert the client normalized coordinates to touchport coordinates
     auto coords = client_to_touchport(input, {from_clamped_netfloat(packet->x, 0.0f, 1.0f) * 65535.f, from_clamped_netfloat(packet->y, 0.0f, 1.0f) * 65535.f}, {65535.f, 65535.f});
@@ -1634,6 +1697,12 @@ namespace input {
   }
 
   void reset(std::shared_ptr<input_t> &input) {
+#ifdef _WIN32
+    if (input->player_index != 0) {
+      teknoparrot_pipe::send_roster(input->player_index, false);
+    }
+#endif
+
     task_pool.cancel(key_press_repeat_id);
     task_pool.cancel(input->mouse_left_button_timeout);
 
@@ -1660,12 +1729,19 @@ namespace input {
   class deinit_t: public platf::deinit_t {
   public:
     ~deinit_t() override {
+#ifdef _WIN32
+      teknoparrot_pipe::deinit();
+#endif
       platf_input.reset();
     }
   };
 
   [[nodiscard]] std::unique_ptr<platf::deinit_t> init() {
     platf_input = platf::input();
+
+#ifdef _WIN32
+    teknoparrot_pipe::init();
+#endif
 
     return std::make_unique<deinit_t>();
   }
@@ -1681,11 +1757,16 @@ namespace input {
     return true;
   }
 
-  std::shared_ptr<input_t> alloc(safe::mail_t mail) {
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, const std::string &client_address) {
     auto input = std::make_shared<input_t>(
       mail->event<input::touch_port_t>(mail::touch_port),
       mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback)
     );
+
+#ifdef _WIN32
+    input->player_index = teknoparrot_pipe::assign_player_slot(client_address);
+    teknoparrot_pipe::send_roster(input->player_index, true);
+#endif
 
     // Workaround to ensure new frames will be captured when a client connects
     task_pool.pushDelayed([]() {

@@ -64,6 +64,14 @@ const config = ref(props.config)
                   v-model="config.install_steam_audio_drivers"
                   default="true"
         ></Checkbox>
+
+        <!-- Force Host Audio -->
+        <Checkbox class="mb-3"
+                  id="force_host_audio"
+                  locale-prefix="config"
+                  v-model="config.force_host_audio"
+                  default="false"
+        ></Checkbox>
       </template>
     </PlatformLayout>
 

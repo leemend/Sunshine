@@ -12,6 +12,7 @@ extern "C" {
 // standard includes
 #include <array>
 #include <cctype>
+#include <cstdio>
 #include <format>
 #include <set>
 #include <unordered_map>
@@ -31,6 +32,9 @@ extern "C" {
 #include "stream.h"
 #include "sync.h"
 #include "video.h"
+#ifdef _WIN32
+  #include "platform/windows/teknoparrot_pipe.h"
+#endif
 
 namespace asio = boost::asio;
 
@@ -762,7 +766,15 @@ namespace rtsp_stream {
     std::stringstream ss;
 
     // Tell the client about our supported features
-    ss << "a=x-ss-general.featureFlags:" << (uint32_t) platf::get_capabilities() << std::endl;
+    auto reported_caps = platf::get_capabilities();
+#ifdef _WIN32
+    teknoparrot_pipe::debug_log("RTSP featureFlags sent to client: 0x" + [&] {
+      char buf[16];
+      snprintf(buf, sizeof(buf), "%02X", (unsigned) reported_caps);
+      return std::string(buf);
+    }() + " (pen_touch bit " + std::string((reported_caps & platf::platform_caps::pen_touch) ? "SET" : "NOT set") + ")");
+#endif
+    ss << "a=x-ss-general.featureFlags:" << (uint32_t) reported_caps << std::endl;
 
     // Always request new control stream encryption if the client supports it
     uint32_t encryption_flags_supported = SS_ENC_CONTROL_V2 | SS_ENC_AUDIO;
@@ -964,7 +976,10 @@ namespace rtsp_stream {
     stream::config_t config;
 
     std::int64_t configuredBitrateKbps;
-    config.audio.flags[audio::config_t::HOST_AUDIO] = session.host_audio;
+    // Normally driven by the client's own "Play audio on host PC" preference
+    // (Moonlight's localAudioPlayMode). force_host_audio overrides that, always keeping this
+    // PC's real speakers active regardless of what any connecting client requests.
+    config.audio.flags[audio::config_t::HOST_AUDIO] = session.host_audio || config::audio.force_host_audio;
     try {
       config.audio.channels = (int) util::from_view(args.at("x-nv-audio.surround.numChannels"sv));
       config.audio.mask = (int) util::from_view(args.at("x-nv-audio.surround.channelMask"sv));

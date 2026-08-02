@@ -24,6 +24,9 @@ extern "C" {
 #include "display_device.h"
 #include "globals.h"
 #include "input.h"
+#ifdef _WIN32
+  #include "platform/windows/teknoparrot_pipe.h"
+#endif
 #include "logging.h"
 #include "network.h"
 #include "platform/common.h"
@@ -405,6 +408,11 @@ namespace stream {
     } control;
 
     std::uint32_t launch_session_id;
+    std::string client_unique_id;  ///< Moonlight client's persistent "uniqueid" (tied to the
+                                    ///< client's installation, not its network address) - used
+                                    ///< by the Windows TeknoParrot identity bridge to keep a
+                                    ///< client's player number stable across session restarts
+                                    ///< regardless of IP changes.
 
     safe::mail_raw_t::event_t<bool> shutdown_event;
     safe::signal_t controlEnd;
@@ -1961,7 +1969,30 @@ namespace stream {
     }
 
     int start(session_t &session, const std::string &addr_string) {
-      session.input = input::alloc(session.mail);
+      // Prefer the client's persistent Moonlight uniqueid (stable regardless of IP changes,
+      // NAT, or multiple devices sharing one public IP when connecting over the internet) for
+      // the TeknoParrot identity bridge. Some clients don't send one, in which case Moonlight's
+      // protocol default is the literal string "unknown" - fall back to the connection's IP
+      // address in that case so such clients don't all collide onto the same identity.
+      // Prefer the client's persistent Moonlight uniqueid (stable regardless of IP changes,
+      // NAT, or multiple devices sharing one public IP when connecting over the internet) for
+      // the TeknoParrot identity bridge. Some clients don't send one, in which case Moonlight's
+      // protocol default is the literal string "unknown" - fall back to the connection's IP
+      // address in that case so such clients don't all collide onto the same identity.
+      // Confirmed via testing that some client implementations *do* send a non-empty uniqueid
+      // that still isn't actually unique - "0123456789ABCDEF" is a known sequential placeholder
+      // several Moonlight-based clients fall back to - so treat that the same way as "unknown".
+      const bool has_real_unique_id = !session.client_unique_id.empty() &&
+                                       session.client_unique_id != "unknown" &&
+                                       session.client_unique_id != "0123456789ABCDEF";
+      const auto &client_identity = has_real_unique_id ? session.client_unique_id : addr_string;
+#ifdef _WIN32
+      teknoparrot_pipe::debug_log(
+        "Client identity resolution: unique_id=[" + session.client_unique_id + "] addr_string=[" + addr_string +
+        "] -> using [" + client_identity + "]"
+      );
+#endif
+      session.input = input::alloc(session.mail, client_identity);
 
       session.broadcast_ref = broadcast.ref();
       if (!session.broadcast_ref) {
@@ -2012,6 +2043,7 @@ namespace stream {
 
       session->config = config;
 
+      session->client_unique_id = launch_session.unique_id;
       session->control.connect_data = launch_session.control_connect_data;
       session->control.feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback);
       session->control.hdr_queue = mail->event<video::hdr_info_t>(mail::hdr);
