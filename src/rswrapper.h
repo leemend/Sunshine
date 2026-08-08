@@ -6,6 +6,7 @@
 #pragma once
 
 // standard includes
+#include <stddef.h>
 #include <stdint.h>
 
 #define DATA_SHARDS_MAX 255
@@ -32,3 +33,13 @@ extern reed_solomon_decode_t reed_solomon_decode_fn;
  * @details The streaming code will directly invoke these function pointers during encoding.
  */
 void reed_solomon_init(void);
+
+/**
+ * @brief Overwrites the RS parity/generator matrix directly.
+ * @details Used by the audio broadcast path to replace the computed matrix with a
+ * known-good one matching Nvidia's implementation - see the call site in stream.cpp
+ * for why. Kept as an ordinary (non-ISA-variant) function since it's a plain memcpy,
+ * not a vectorized operation, and exists specifically so callers never need the full
+ * reed_solomon struct layout visible - that stays internal to rswrapper.c.
+ */
+void reed_solomon_set_matrix(reed_solomon *rs, const uint8_t *matrix, size_t size);

@@ -43,6 +43,7 @@
 
   // local includes
   #include "confighttp.h"
+  #include "connection_gate.h"
   #include "display_device.h"
   #include "logging.h"
   #include "platform/common.h"
@@ -99,6 +100,37 @@ namespace system_tray {
     lifetime::exit_sunshine(0, true);
   }
 
+  /**
+   * @brief Reflects connection_gate's current selected mode onto the tray's checkmarks and
+   * refreshes the tray so the change is visible immediately. Called after any menu-driven
+   * mode change, and once from init_tray() to reflect the mode Sunshine actually started in.
+   */
+  void sync_connection_gate_menu();
+
+  void tray_connection_gate_open_cb([[maybe_unused]] struct tray_menu *item) {
+    connection_gate::set_mode(connection_gate::mode_e::open);
+    sync_connection_gate_menu();
+  }
+
+  void tray_connection_gate_closed_cb([[maybe_unused]] struct tray_menu *item) {
+    connection_gate::set_mode(connection_gate::mode_e::closed);
+    sync_connection_gate_menu();
+  }
+
+  void tray_connection_gate_auto_close_cb([[maybe_unused]] struct tray_menu *item) {
+    connection_gate::set_mode(connection_gate::mode_e::auto_close);
+    sync_connection_gate_menu();
+  }
+
+  // Named (not inline-anonymous like the rest of the static tray struct below) so
+  // sync_connection_gate_menu() can index into it directly to update .checked state.
+  static struct tray_menu connection_gate_submenu[] = {
+    {.text = "Open", .checkbox = 1, .cb = tray_connection_gate_open_cb},
+    {.text = "Closed", .checkbox = 1, .cb = tray_connection_gate_closed_cb},
+    {.text = "Auto-Close (closes after configurable delay once everyone's gone)", .checkbox = 1, .cb = tray_connection_gate_auto_close_cb},
+    {.text = nullptr}
+  };
+
   // Tray menu
   static struct tray tray = {
     .icon = TRAY_ICON,
@@ -116,6 +148,7 @@ namespace system_tray {
              {.text = "PayPal", .cb = tray_donate_paypal_cb},
              {.text = nullptr}
            }},
+        {.text = "Connections", .submenu = connection_gate_submenu},
         {.text = "-"},
   // Currently display device settings are only supported on Windows
   #ifdef _WIN32
@@ -128,6 +161,17 @@ namespace system_tray {
     .iconPathCount = 4,
     .allIconPaths = {TRAY_ICON, TRAY_ICON_LOCKED, TRAY_ICON_PLAYING, TRAY_ICON_PAUSING},
   };
+
+  void sync_connection_gate_menu() {
+    auto mode = connection_gate::current_mode();
+    connection_gate_submenu[0].checked = (mode == connection_gate::mode_e::open);
+    connection_gate_submenu[1].checked = (mode == connection_gate::mode_e::closed);
+    connection_gate_submenu[2].checked = (mode == connection_gate::mode_e::auto_close);
+
+    if (tray_initialized) {
+      tray_update(&tray);
+    }
+  }
 
   const char *GetResourcePath(const char *relativePath) {
   #ifdef __APPLE__
@@ -261,6 +305,8 @@ namespace system_tray {
 
     BOOST_LOG(info) << "System tray created"sv;
     tray_initialized = true;
+    connection_gate::set_on_mode_changed(sync_connection_gate_menu);
+    sync_connection_gate_menu();
     return 0;
   }
 

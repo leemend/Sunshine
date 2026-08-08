@@ -218,6 +218,17 @@ namespace config {
 
     bool high_resolution_scrolling;
     bool native_pen_touch;
+
+    std::string desktop_input_mode;  ///< "full_control" (default): behaves exactly as
+                                      ///< Sunshine always has - connected clients' mouse/
+                                      ///< keyboard control the real Windows desktop, e.g.
+                                      ///< for someone joining from a laptop/phone to remote
+                                      ///< into the whole PC. "game_only": mouse/keyboard
+                                      ///< events are still delivered to compatible
+                                      ///< integrations such as the TeknoParrot identity
+                                      ///< bridge (so clients can still be bound as devices
+                                      ///< and used to play/configure games there), but
+                                      ///< never injected into the real desktop at all.
   };
 
   namespace flag {
@@ -278,6 +289,14 @@ namespace config {
     // List of allowed origins for CSRF protection (e.g., "https://example.com,https://app.example.com")
     // Comma-separated list of additional origins. Default includes localhost variants and web UI port.
     std::vector<std::string> csrf_allowed_origins;
+
+    std::string connection_gate_mode;  ///< "open" | "closed" | "auto_close" -
+                                        ///< see connection_gate.h. This is only the *starting*
+                                        ///< mode read at launch; the live mode can be changed
+                                        ///< afterward without touching this config value.
+    int connection_gate_auto_close_seconds;  ///< Seconds of no active session before auto_close
+                                              ///< mode closes the gate. 0 closes immediately
+                                              ///< when the last client disconnects.
   };
 
   extern video_t video;

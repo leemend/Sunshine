@@ -21,6 +21,7 @@
 
 // local includes
 #include "config.h"
+#include "connection_gate.h"
 #include "display_device.h"
 #include "file_handler.h"
 #include "globals.h"
@@ -854,6 +855,15 @@ namespace nvhttp {
       return;
     }
 
+    if (!connection_gate::is_open()) {
+      BOOST_LOG(info) << "Rejected launch request: connection gate is closed"sv;
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "Host is not currently accepting new connections");
+
+      return;
+    }
+
     auto appid = util::from_view(get_arg(args, "appid"));
 
     auto current_appid = proc::proc.running();
@@ -974,6 +984,23 @@ namespace nvhttp {
     if (no_active_sessions && args.find("localAudioPlayMode"s) != std::end(args)) {
       host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     }
+
+    // Gate resume() too, but only when nobody is currently actively streaming
+    // (no_active_sessions) - this is the exact scenario that made auto_close look broken:
+    // the app itself keeps running after everyone disconnects, so a later reconnect comes
+    // through here (proc::proc.running() != 0), not launch() (which only fires for a genuinely
+    // new app launch) - meaning it was completely bypassing the gate. If other clients are
+    // already actively streaming this same session (!no_active_sessions), don't gate at all -
+    // that's just another player joining an already-open, already-approved shared session.
+    if (no_active_sessions && !connection_gate::is_open()) {
+      BOOST_LOG(info) << "Rejected resume request: connection gate is closed"sv;
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "Host is not currently accepting new connections");
+
+      return;
+    }
+
     const auto launch_session = make_launch_session(host_audio, args);
 
     if (no_active_sessions) {

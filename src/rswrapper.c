@@ -151,3 +151,13 @@ void reed_solomon_init(void) {
     reed_solomon_init_def();
   }
 }
+
+// The reed_solomon struct's layout (rs.h) is the same across every ISA variant compiled
+// above - only the encode/decode implementations differ, not the struct itself - so this
+// is safe as a single, ordinary (non-ISA-variant) function. It's visible here because rs.c
+// (included multiple times above) itself includes rs.h, which stays in scope for the rest
+// of this translation unit even though rswrapper.h only exposes reed_solomon as opaque to
+// external callers.
+void reed_solomon_set_matrix(reed_solomon *rs, const uint8_t *matrix, size_t size) {
+  memcpy(rs->p, matrix, size);
+}

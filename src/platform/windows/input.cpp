@@ -534,7 +534,9 @@ namespace platf {
     mi.dx = scaled_x;
     mi.dy = scaled_y;
 
-    send_input(i);
+    if (config::input.desktop_input_mode != "game_only") {
+      send_input(i);
+    }
 
     if (auto player = ::input::get_active_player()) {
       teknoparrot_pipe::debug_log("abs_mouse -> player " + std::to_string(player) + " x=" + std::to_string(scaled_x) + " y=" + std::to_string(scaled_y));
@@ -552,7 +554,9 @@ namespace platf {
     mi.dx = deltaX;
     mi.dy = deltaY;
 
-    send_input(i);
+    if (config::input.desktop_input_mode != "game_only") {
+      send_input(i);
+    }
 
     if (auto player = ::input::get_active_player()) {
       teknoparrot_pipe::debug_log("move_mouse -> player " + std::to_string(player) + " dx=" + std::to_string(deltaX) + " dy=" + std::to_string(deltaY));
@@ -602,7 +606,9 @@ namespace platf {
       tp_button = 4;
     }
 
-    send_input(i);
+    if (config::input.desktop_input_mode != "game_only") {
+      send_input(i);
+    }
 
     if (auto player = ::input::get_active_player()) {
       teknoparrot_pipe::send_mouse_button(player, tp_button, !release);
@@ -618,7 +624,9 @@ namespace platf {
     mi.dwFlags = MOUSEEVENTF_WHEEL;
     mi.mouseData = distance;
 
-    send_input(i);
+    if (config::input.desktop_input_mode != "game_only") {
+      send_input(i);
+    }
 
     if (auto player = ::input::get_active_player()) {
       teknoparrot_pipe::send_mouse_wheel(player, distance);
@@ -634,7 +642,9 @@ namespace platf {
     mi.dwFlags = MOUSEEVENTF_HWHEEL;
     mi.mouseData = distance;
 
-    send_input(i);
+    if (config::input.desktop_input_mode != "game_only") {
+      send_input(i);
+    }
   }
 
   void keyboard_update(input_t &input, uint16_t modcode, bool release, uint8_t flags) {
@@ -689,7 +699,9 @@ namespace platf {
       ki.dwFlags |= KEYEVENTF_KEYUP;
     }
 
-    send_input(i);
+    if (config::input.desktop_input_mode != "game_only") {
+      send_input(i);
+    }
 
     if (auto player = ::input::get_active_player()) {
       teknoparrot_pipe::send_key(player, modcode, !release);
@@ -1181,6 +1193,10 @@ namespace platf {
   }
 
   void unicode(input_t &input, char *utf8, int size) {
+    if (config::input.desktop_input_mode == "game_only") {
+      return;
+    }
+
     // We can do no worse than one UTF-16 character per byte of UTF-8
     std::vector<WCHAR> wide(size);
 

@@ -21,6 +21,7 @@ extern "C" {
 
 // local includes
 #include "config.h"
+#include "connection_gate.h"
 #include "display_device.h"
 #include "globals.h"
 #include "input.h"
@@ -1614,7 +1615,7 @@ namespace stream {
     // works correctly. This is possible because the data and FEC shard count is
     // constant and known in advance.
     const unsigned char parity[] = {0x77, 0x40, 0x38, 0x0e, 0xc7, 0xa7, 0x0d, 0x6c};
-    memcpy(rs.get()->p, parity, sizeof(parity));
+    reed_solomon_set_matrix(rs.get(), parity, sizeof(parity));
 
     audio_packet.rtp.header = 0x80;
     audio_packet.rtp.packetType = 97;

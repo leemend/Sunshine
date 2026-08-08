@@ -181,6 +181,16 @@ const config = ref(props.config)
               v-model="config.native_pen_touch"
               default="true"
     ></Checkbox>
+
+    <!-- Desktop Input Mode -->
+    <div class="mb-3">
+      <label for="desktop_input_mode" class="form-label">{{ $t('config.desktop_input_mode') }}</label>
+      <select id="desktop_input_mode" class="form-select" v-model="config.desktop_input_mode">
+        <option value="full_control">{{ $t('config.desktop_input_mode_full_control') }}</option>
+        <option value="game_only">{{ $t('config.desktop_input_mode_game_only') }}</option>
+      </select>
+      <div class="form-text">{{ $t('config.desktop_input_mode_desc') }}</div>
+    </div>
   </div>
 </template>
 

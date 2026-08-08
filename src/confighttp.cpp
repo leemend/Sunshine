@@ -30,6 +30,7 @@
 
 // local includes
 #include "config.h"
+#include "connection_gate.h"
 #include "confighttp.h"
 #include "crypto.h"
 #include "display_device.h"
@@ -1532,6 +1533,109 @@ namespace confighttp {
   }
 
   /**
+   * @brief Get the connection gate's current mode and effective open/closed state.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * @api_examples{/api/connection_gate| GET| null}
+   */
+  void getConnectionGate(const resp_https_t &response, const req_https_t &request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    nlohmann::json output_tree;
+    output_tree["mode"] = connection_gate::mode_to_string(connection_gate::current_mode());
+    output_tree["is_open"] = connection_gate::is_open();
+    output_tree["auto_close_seconds"] = config::sunshine.connection_gate_auto_close_seconds;
+
+    auto countdown = connection_gate::seconds_until_auto_close();
+    output_tree["closing_in_seconds"] = countdown ? nlohmann::json(*countdown) : nlohmann::json(nullptr);
+
+    send_response(response, output_tree);
+  }
+
+  /**
+   * @brief Set the connection gate's current mode and/or its auto-close delay.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * Both fields are optional and independent - send just "mode" to switch modes, just
+   * "auto_close_seconds" to change the delay without touching the current mode, or both
+   * together. This changes the *live* state only - it does not modify sunshine.conf, matching
+   * how the systray/hotkey toggles work too. The configured values only control what Sunshine
+   * starts with.
+   *
+   * @api_examples{/api/connection_gate| POST| {"mode":"open"}}
+   */
+  void setConnectionGate(const resp_https_t &response, const req_https_t &request) {
+    if (!check_content_type(response, request, "application/json")) {
+      return;
+    }
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    std::string client_id = get_client_id(request);
+    if (!validate_csrf_token(response, request, client_id)) {
+      return;
+    }
+
+    print_req(request);
+
+    nlohmann::json output_tree;
+
+    std::stringstream ss;
+    ss << request->content.rdbuf();
+    try {
+      nlohmann::json input_tree = nlohmann::json::parse(ss);
+
+      if (input_tree.contains("mode")) {
+        const std::string mode_str = input_tree.value("mode", "");
+
+        static const std::vector<std::string> valid_modes {"open", "closed", "auto_close"};
+        if (std::find(valid_modes.begin(), valid_modes.end(), mode_str) == valid_modes.end()) {
+          output_tree["status"] = false;
+          output_tree["error"] = "Invalid mode - must be one of open, closed, auto_close";
+          send_response(response, output_tree);
+          return;
+        }
+
+        connection_gate::set_mode(connection_gate::mode_from_string(mode_str));
+      }
+
+      if (input_tree.contains("auto_close_seconds")) {
+        int seconds = input_tree.value("auto_close_seconds", -1);
+        if (seconds < 0 || seconds > 86400) {
+          output_tree["status"] = false;
+          output_tree["error"] = "auto_close_seconds must be between 0 and 86400";
+          send_response(response, output_tree);
+          return;
+        }
+
+        config::sunshine.connection_gate_auto_close_seconds = seconds;
+        BOOST_LOG(info) << "connection_gate: auto-close delay changed to "sv << seconds << " second(s)"sv;
+      }
+
+      output_tree["status"] = true;
+      output_tree["mode"] = connection_gate::mode_to_string(connection_gate::current_mode());
+      output_tree["is_open"] = connection_gate::is_open();
+      output_tree["auto_close_seconds"] = config::sunshine.connection_gate_auto_close_seconds;
+
+      auto countdown = connection_gate::seconds_until_auto_close();
+      output_tree["closing_in_seconds"] = countdown ? nlohmann::json(*countdown) : nlohmann::json(nullptr);
+    } catch (std::exception &e) {
+      BOOST_LOG(warning) << "SetConnectionGate: "sv << e.what();
+      output_tree["status"] = false;
+      output_tree["error"] = e.what();
+    }
+
+    send_response(response, output_tree);
+  }
+
+  /**
    * @brief Checks whether a directory entry qualifies as an executable file.
    * @param entry The directory entry to check.
    * @param status The cached file status for the entry.
@@ -1773,6 +1877,8 @@ namespace confighttp {
     server.resource["^/api/clients/update$"]["POST"] = updateClient;
     server.resource["^/api/config$"]["GET"] = getConfig;
     server.resource["^/api/config$"]["POST"] = saveConfig;
+    server.resource["^/api/connection_gate$"]["GET"] = getConnectionGate;
+    server.resource["^/api/connection_gate$"]["POST"] = setConnectionGate;
     server.resource["^/api/configLocale$"]["GET"] = getLocale;
     server.resource["^/api/covers/([0-9]+)$"]["GET"] = getCover;
     server.resource["^/api/covers/upload$"]["POST"] = uploadCover;

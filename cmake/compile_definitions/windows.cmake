@@ -67,6 +67,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/input.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/teknoparrot_pipe.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/teknoparrot_pipe.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/connection_gate_hotkey.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/connection_gate_hotkey.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_base.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_vram.cpp"

@@ -1034,7 +1034,9 @@ namespace input {
       contact_area.second,
     };
 
-    platf::touch_update(input->client_context.get(), *abs_port, touch);
+    if (config::input.desktop_input_mode != "game_only") {
+      platf::touch_update(input->client_context.get(), *abs_port, touch);
+    }
   }
 
   /**

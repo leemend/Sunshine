@@ -15,6 +15,10 @@
 
 // local includes
 #include "confighttp.h"
+#include "connection_gate.h"
+#ifdef _WIN32
+  #include "platform/windows/connection_gate_hotkey.h"
+#endif
 #include "display_device.h"
 #include "entry_handler.h"
 #include "globals.h"
@@ -174,6 +178,11 @@ int main(int argc, char *argv[]) {
   // if anything is logged prior to this point, it will appear in stdout, but not in the log viewer in the UI
   // the version should be printed to the log before anything else
   BOOST_LOG(info) << PROJECT_NAME << " version: " << PROJECT_VERSION << " commit: " << PROJECT_VERSION_COMMIT;
+
+  connection_gate::init();
+#ifdef _WIN32
+  connection_gate_hotkey::init();
+#endif
 
   // Log publisher metadata
   log_publisher_data();

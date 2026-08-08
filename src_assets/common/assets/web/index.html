@@ -11,6 +11,74 @@
     <h1 class="my-4">{{ $t('index.welcome') }}</h1>
     <p>{{ $t('index.description') }}</p>
 
+    <!-- Connection Gate -->
+    <div class="card my-4" v-if="connectionGate">
+      <div class="card-body">
+        <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+          <h2 class="mb-0">{{ $t('index.connection_gate_title') }}</h2>
+          <div class="d-flex align-items-center gap-2">
+            <span class="text-body-secondary" v-if="closingInSeconds !== null">
+              {{ $t('index.connection_gate_closing_in', { time: formatCountdown(closingInSeconds) }) }}
+            </span>
+            <span class="badge" :class="connectionGate.is_open ? 'text-bg-success' : 'text-bg-secondary'">
+              {{ connectionGate.is_open ? $t('index.connection_gate_status_open') : $t('index.connection_gate_status_closed') }}
+            </span>
+          </div>
+        </div>
+        <p class="text-body-secondary mb-3">{{ $t('index.connection_gate_desc') }}</p>
+        <div class="btn-group flex-wrap" role="group">
+          <button type="button" class="btn"
+                  :class="connectionGate.mode === 'open' ? 'btn-primary' : 'btn-outline-primary'"
+                  :disabled="gateUpdating"
+                  @click="setConnectionGateMode('open')">
+            {{ $t('index.connection_gate_mode_open') }}
+          </button>
+          <button type="button" class="btn"
+                  :class="connectionGate.mode === 'closed' ? 'btn-primary' : 'btn-outline-primary'"
+                  :disabled="gateUpdating"
+                  @click="setConnectionGateMode('closed')">
+            {{ $t('index.connection_gate_mode_closed') }}
+          </button>
+          <button type="button" class="btn"
+                  :class="connectionGate.mode === 'auto_close' ? 'btn-primary' : 'btn-outline-primary'"
+                  :disabled="gateUpdating"
+                  @click="setConnectionGateMode('auto_close')">
+            {{ $t('index.connection_gate_mode_auto_close') }}
+          </button>
+        </div>
+        <div class="d-flex align-items-center flex-wrap gap-2 mt-3" v-if="connectionGate.mode === 'auto_close'">
+          <label class="col-form-label">{{ $t('index.connection_gate_auto_close_label') }}</label>
+          <input id="gate-auto-close-minutes"
+                 type="number"
+                 class="form-control"
+                 style="width: 5.5rem;"
+                 min="0"
+                 max="1440"
+                 v-model.number="autoCloseMinutesInput"
+                 :disabled="gateUpdating"
+                 :aria-label="$t('index.connection_gate_auto_close_minutes_aria')">
+          <span>{{ $t('index.connection_gate_minutes_short') }}</span>
+          <input id="gate-auto-close-seconds"
+                 type="number"
+                 class="form-control"
+                 style="width: 5.5rem;"
+                 min="0"
+                 max="59"
+                 v-model.number="autoCloseSecondsInput"
+                 :disabled="gateUpdating"
+                 :aria-label="$t('index.connection_gate_auto_close_seconds_aria')">
+          <span>{{ $t('index.connection_gate_seconds_short') }}</span>
+          <button type="button"
+                  class="btn btn-outline-secondary"
+                  :disabled="gateUpdating || autoCloseTotalSecondsInput === connectionGate.auto_close_seconds"
+                  @click="saveAutoCloseDelay">
+            {{ $t('_common.save') }}
+          </button>
+        </div>
+        <div class="alert alert-danger mt-3 mb-0" v-if="gateError">{{ gateError }}</div>
+      </div>
+    </div>
+
     <!-- Fatal Errors Alert -->
     <div class="alert alert-danger my-4" v-if="fancyLogs.find(x => x.level === 'Fatal')">
       <div>
@@ -56,65 +124,9 @@
       <div class="card-body" v-if="version">
         <h2>Version {{version.version}}</h2>
 
-        <div v-if="loading" class="my-3">
-          {{ $t('index.loading_latest') }}
-        </div>
-
-        <div class="alert alert-success my-3" v-if="buildVersionIsDirty">
-          <package :size="18" class="icon"></package>
-          {{ $t('index.version_dirty') }} 🌇
-        </div>
-
-        <div class="alert alert-info my-3" v-if="installedVersionNotStable">
+        <div class="alert alert-info my-3">
           <info :size="18" class="icon"></info>
-          {{ $t('index.installed_version_not_stable') }}
-        </div>
-
-        <div v-else-if="(!preReleaseBuildAvailable || !notifyPreReleases) && !stableBuildAvailable && !buildVersionIsDirty">
-          <div class="alert alert-success my-3">
-            <check-circle :size="18" class="icon"></check-circle>
-            {{ $t('index.version_latest') }}
-          </div>
-        </div>
-
-        <div v-if="notifyPreReleases && preReleaseBuildAvailable">
-          <div class="alert alert-warning my-3">
-            <!-- header row -->
-            <div class="d-flex align-items-center justify-content-between gap-3 flex-wrap mb-3">
-              <div class="d-flex align-items-center gap-3 flex-wrap">
-                <alert-circle :size="18" class="icon"></alert-circle>
-                <span>{{ $t('index.new_pre_release') }}</span>
-                <h5 class="mb-0">{{ preReleaseVersion.release.name }}</h5>
-              </div>
-              <a class="btn btn-success flex-shrink-0" :href="preReleaseVersion.release.html_url" target="_blank">
-                <download :size="18" class="icon"></download>
-                {{ $t('index.download') }}
-              </a>
-            </div>
-
-            <!-- body row (full width) -->
-            <div class="markdown-body release-notes" v-html="convertMarkdownToHtml(preReleaseVersion.release.body)"></div>
-          </div>
-        </div>
-
-        <div v-if="stableBuildAvailable">
-          <div class="alert alert-warning my-3">
-            <!-- header row -->
-            <div class="d-flex align-items-center justify-content-between gap-3 flex-wrap mb-3">
-              <div class="d-flex align-items-center gap-3 flex-wrap">
-                <alert-circle :size="18" class="icon"></alert-circle>
-                <span>{{ $t('index.new_stable') }}</span>
-                <h5 class="mb-0">{{ githubVersion.release.name }}</h5>
-              </div>
-              <a class="btn btn-success flex-shrink-0" :href="githubVersion.release.html_url" target="_blank">
-                <download :size="18" class="icon"></download>
-                {{ $t('index.download') }}
-              </a>
-            </div>
-
-            <!-- body row (full width) -->
-            <div class="markdown-body release-notes" v-html="convertMarkdownToHtml(githubVersion.release.body)"></div>
-          </div>
+          {{ $t('index.custom_build_notice') }}
         </div>
       </div>
     </div>
@@ -138,10 +150,7 @@
     AlertTriangle,
     FileText,
     Wrench,
-    Package,
-    Info,
-    CheckCircle,
-    Download
+    Info
   } from 'lucide-vue-next'
 
   // Configure marked to allow HTML
@@ -162,36 +171,31 @@
       AlertTriangle,
       FileText,
       Wrench,
-      Package,
-      Info,
-      CheckCircle,
-      Download
+      Info
     },
     data() {
       return {
         version: null,
-        githubVersion: null,
-        notifyPreReleases: false,
-        preReleaseVersion: null,
         loading: true,
         logs: null,
         platform: "",
         controllerEnabled: false,
         vigembus: null,
+        connectionGate: null,
+        closingInSeconds: null,
+        autoCloseMinutesInput: 0,
+        autoCloseSecondsInput: 0,
+        gateUpdating: false,
+        gateError: null,
       }
     },
     async created() {
       try {
         let config = await fetch("./api/config").then((r) => r.json());
-        this.notifyPreReleases = config.notify_pre_releases;
         this.platform = config.platform;
         this.controllerEnabled = config.controller !== "disabled";
         this.version = new SunshineVersion(null, config.version);
         console.log("Version: ", this.version.version)
-        this.githubVersion = new SunshineVersion(await fetch("https://api.github.com/repos/LizardByte/Sunshine/releases/latest").then((r) => r.json()), null);
-        console.log("GitHub Version: ", this.githubVersion.version)
-        this.preReleaseVersion = new SunshineVersion((await fetch("https://api.github.com/repos/LizardByte/Sunshine/releases").then((r) => r.json())).find(release => release.prerelease), null);
-        console.log("Pre-Release Version: ", this.preReleaseVersion.version)
 
         // Fetch ViGEmBus status only on Windows when controller is enabled
         if (this.platform === 'windows' && this.controllerEnabled) {
@@ -200,6 +204,16 @@
           } catch (e) {
             console.error("Failed to fetch ViGEmBus status:", e);
           }
+        }
+
+        try {
+          this.connectionGate = await fetch("./api/connection_gate").then((r) => r.json());
+          this.autoCloseMinutesInput = Math.floor(this.connectionGate.auto_close_seconds / 60);
+          this.autoCloseSecondsInput = this.connectionGate.auto_close_seconds % 60;
+          this.closingInSeconds = this.connectionGate.closing_in_seconds;
+          this.startGateTimers();
+        } catch (e) {
+          console.error("Failed to fetch connection gate status:", e);
         }
       } catch (e) {
         console.error(e);
@@ -212,27 +226,11 @@
       this.loading = false;
     },
     computed: {
-      installedVersionNotStable() {
-        if (!this.githubVersion || !this.version) {
-          return false;
-        }
-        return this.version.isGreater(this.githubVersion);
-      },
-      stableBuildAvailable() {
-        if (!this.githubVersion || !this.version) {
-          return false;
-        }
-        return this.githubVersion.isGreater(this.version);
-      },
-      preReleaseBuildAvailable() {
-        if (!this.preReleaseVersion || !this.githubVersion || !this.version) {
-          return false;
-        }
-        return this.preReleaseVersion.isGreater(this.version) && this.preReleaseVersion.isGreater(this.githubVersion);
-      },
-      buildVersionIsDirty() {
-        return this.version.version?.split(".").length === 5 &&
-          this.version.version.indexOf("dirty") !== -1
+      /** Combines the separate minutes/seconds inputs into the total seconds the API expects. */
+      autoCloseTotalSecondsInput() {
+        const minutes = Number(this.autoCloseMinutesInput) || 0;
+        const seconds = Number(this.autoCloseSecondsInput) || 0;
+        return minutes * 60 + seconds;
       },
       /** Parse the text errors, calculating the text, the timestamp and the level */
       fancyLogs() {
@@ -250,6 +248,83 @@
       convertMarkdownToHtml(markdown) {
         if (!markdown) return '';
         return marked.parse(markdown);
+      },
+      async setConnectionGateMode(mode) {
+        this.gateUpdating = true;
+        this.gateError = null;
+        try {
+          const result = await fetch("./api/connection_gate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ mode }),
+          }).then((r) => r.json());
+
+          if (result.status) {
+            this.connectionGate = { ...this.connectionGate, mode: result.mode, is_open: result.is_open, auto_close_seconds: result.auto_close_seconds };
+            this.closingInSeconds = result.closing_in_seconds;
+          } else {
+            this.gateError = result.error || "Failed to change connection gate mode";
+          }
+        } catch (e) {
+          console.error("Failed to set connection gate mode:", e);
+          this.gateError = "Failed to change connection gate mode";
+        }
+        this.gateUpdating = false;
+      },
+      async saveAutoCloseDelay() {
+        const totalSeconds = this.autoCloseTotalSecondsInput;
+        if (totalSeconds < 0 || totalSeconds > 86400) {
+          this.gateError = "Auto-close delay must be between 0 seconds and 24 hours";
+          return;
+        }
+
+        this.gateUpdating = true;
+        this.gateError = null;
+        try {
+          const result = await fetch("./api/connection_gate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ auto_close_seconds: totalSeconds }),
+          }).then((r) => r.json());
+
+          if (result.status) {
+            this.connectionGate = { ...this.connectionGate, auto_close_seconds: result.auto_close_seconds };
+          } else {
+            this.gateError = result.error || "Failed to change auto-close delay";
+          }
+        } catch (e) {
+          console.error("Failed to set auto-close delay:", e);
+          this.gateError = "Failed to change auto-close delay";
+        }
+        this.gateUpdating = false;
+      },
+      /**
+       * Starts two timers for the countdown: a 1-second local tick for a smooth-looking
+       * countdown, and a slower re-fetch from the server so it stays accurate - correcting
+       * for drift, and picking up mode changes made elsewhere (systray, hotkey, another
+       * browser tab) that this page wouldn't otherwise know about.
+       */
+      startGateTimers() {
+        setInterval(() => {
+          if (this.closingInSeconds !== null && this.closingInSeconds > 0) {
+            this.closingInSeconds -= 1;
+          }
+        }, 1000);
+
+        setInterval(async () => {
+          try {
+            const status = await fetch("./api/connection_gate").then((r) => r.json());
+            this.connectionGate = { ...this.connectionGate, mode: status.mode, is_open: status.is_open, auto_close_seconds: status.auto_close_seconds };
+            this.closingInSeconds = status.closing_in_seconds;
+          } catch (e) {
+            console.error("Failed to refresh connection gate status:", e);
+          }
+        }, 5000);
+      },
+      formatCountdown(totalSeconds) {
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
       }
     }
   });

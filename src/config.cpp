@@ -583,6 +583,7 @@ namespace config {
     true,  // always send scancodes
     true,  // high resolution scrolling
     true,  // native pen/touch support
+    "game_only"s,  // desktop_input_mode
   };
 
   sunshine_t sunshine {
@@ -602,6 +603,9 @@ namespace config {
     false,  // notify_pre_releases
     true,  // system_tray
     {},  // prep commands
+    {},  // csrf_allowed_origins
+    "closed"s,  // connection_gate_mode - fail closed by default, matching the whole point of the feature
+    210,  // connection_gate_auto_close_seconds (3 minutes 30 seconds)
   };
 
   bool endline(char ch) {
@@ -1315,9 +1319,16 @@ namespace config {
 
     bool_f(vars, "high_resolution_scrolling", input.high_resolution_scrolling);
     bool_f(vars, "native_pen_touch", input.native_pen_touch);
+    string_restricted_f(vars, "desktop_input_mode"s, input.desktop_input_mode, {"full_control"sv, "game_only"sv});
 
     bool_f(vars, "notify_pre_releases", sunshine.notify_pre_releases);
     bool_f(vars, "system_tray", sunshine.system_tray);
+    // "auto_inactivity" kept in the allowed list for backward compatibility with configs
+    // written before these two modes were merged - mode_from_string() (called later, in
+    // connection_gate::init()) translates it to auto_close. Without it here, string_restricted_f
+    // would silently discard the value entirely before mode_from_string ever saw it.
+    string_restricted_f(vars, "connection_gate_mode"s, sunshine.connection_gate_mode, {"open"sv, "closed"sv, "auto_close"sv, "auto_inactivity"sv});
+    int_f(vars, "connection_gate_auto_close_seconds", sunshine.connection_gate_auto_close_seconds);
 
     int port = sunshine.port;
     int_between_f(vars, "port"s, port, {1024 + nvhttp::PORT_HTTPS, 65535 - rtsp_stream::RTSP_SETUP_PORT});
