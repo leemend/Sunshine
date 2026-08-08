@@ -268,6 +268,24 @@ namespace platf {
         return -1;
       }
 
+      // Forward which real Windows XInput slot this player's controller landed in, so
+      // TeknoParrotUI can tell players' gamepads apart during binding capture - see
+      // teknoparrot_pipe::send_gamepad_slot() for why this can't just be assumed/computed
+      // locally (XInput slots are handed out by Windows in allocation order, not by player).
+      // ::input::get_active_player() reads the same thread-local value set just before this
+      // allocation was kicked off (input.cpp's PSS_CONTROLLER_ARRIVAL_PACKET handler) - valid
+      // here because this whole call chain is synchronous, no thread hop in between.
+      if (gp_type == Xbox360Wired) {
+        if (auto player = ::input::get_active_player()) {
+          ULONG user_index = 0;
+          if (VIGEM_SUCCESS(vigem_target_x360_get_user_index(client.get(), gamepad.gp.get(), &user_index))) {
+            teknoparrot_pipe::send_gamepad_slot(player, static_cast<int>(user_index));
+          } else {
+            BOOST_LOG(warning) << "Couldn't query XInput user index for gamepad slot forwarding"sv;
+          }
+        }
+      }
+
       gamepad.feedback_queue = std::move(feedback_queue);
 
       if (gp_type == Xbox360Wired) {

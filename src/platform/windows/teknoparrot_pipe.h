@@ -14,6 +14,7 @@
  *   0x04 MouseButton    [type][player][down][button]                 4 bytes
  *   0x05 MouseWheel      [type][player][delta0..delta3]                6 bytes
  *   0x06 AbsPosition    [type][player][x0..x3][y0..y3]                10 bytes
+ *   0x07 GamepadSlot     [type][player][xinput_index]                  3 bytes
  *
  *   player:  2-4 (slot 1 is reserved for the host's own local input)
  *   button:  0=Left, 1=Right, 2=Middle, 3=Button4(X1), 4=Button5(X2)
@@ -24,6 +25,10 @@
  *        position instead of relative deltas. Not meaningful for trackball-type games - a
  *        trackball has no absolute position, only velocity.
  *   vk: unsigned 16-bit Windows virtual-key code, little-endian
+ *   xinput_index: the real Windows XInput user index (0-3) ViGEmBus assigned this player's
+ *        virtual controller - the same index XInputGetState() and DirectInput controller
+ *        enumeration would report, letting TeknoParrotUI tell which physical/virtual slot
+ *        belongs to which streamed player.
  *
  * The pipe is named \\.\pipe\SunshineTeknoParrotInput and is written to by Sunshine only
  * (PIPE_ACCESS_OUTBOUND); TeknoParrotUI connects as a reader. If no client is connected,
@@ -101,6 +106,17 @@ namespace teknoparrot_pipe {
   void send_key(int player, uint16_t vk_code, bool down);
 
   /**
+   * @brief Announces which real Windows XInput user index (0-3) ViGEmBus assigned a player's
+   * virtual controller, so TeknoParrotUI can tell one streamed player's gamepad apart from
+   * another's during binding capture - unlike mouse/keyboard, gamepad slots aren't inherently
+   * tied to a player; Windows just hands out the next free XInput index in allocation order.
+   * Sent once, right when the controller is first allocated (PSS_CONTROLLER_ARRIVAL_PACKET).
+   * @param player Player slot, 2-4.
+   * @param xinput_index The real XInput user index (0-3) this player's controller was assigned.
+   */
+  void send_gamepad_slot(int player, int xinput_index);
+
+  /**
    * @brief Temporary diagnostic logger (OutputDebugStringA, visible in DebugView++). Remove once
    * the Native Touch / absolute-position issue is diagnosed.
    */
@@ -117,5 +133,19 @@ namespace teknoparrot_pipe {
    * @return The assigned player slot, 2-4.
    */
   int assign_player_slot(const std::string &client_address);
+
+  /**
+   * @brief Whether a genuinely new client (not one already holding a sticky slot) could
+   * currently get a real, non-colliding player slot - i.e. whether assign_player_slot() would
+   * hand back a real slot rather than falling through to its collision-risk round-robin
+   * overflow. Read-only: does not reserve or change anything, safe to call speculatively
+   * before a session even starts (e.g. from nvhttp.cpp's launch()/resume() handlers) to reject
+   * a connection cleanly - a normal "couldn't connect" on the client's end - rather than
+   * letting them stream in and silently fight another player for the same slot.
+   * @param client_address A stable per-client identifier (the connecting client's address).
+   * Reconnecting clients that already hold a sticky slot always return true here, since they
+   * aren't creating a new occupant - just resuming their own.
+   */
+  bool has_free_player_slot(const std::string &client_address);
 
 }  // namespace teknoparrot_pipe

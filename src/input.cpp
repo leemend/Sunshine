@@ -932,6 +932,11 @@ namespace input {
       return;
     }
 
+    // So the Windows backend can associate the resulting ViGEm allocation (and the real
+    // XInput user index it gets assigned) with the player who requested it, for forwarding
+    // to TeknoParrotUI - see teknoparrot_pipe::send_gamepad_slot().
+    set_active_player(input->player_index);
+
     // Allocate a new gamepad
     if (platf::alloc_gamepad(platf_input, {id, packet->controllerNumber}, arrival, input->feedback_queue)) {
       free_id(gamepadMask, id);

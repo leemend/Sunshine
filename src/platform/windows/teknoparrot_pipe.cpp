@@ -38,7 +38,8 @@ namespace teknoparrot_pipe {
       MSG_MOUSE_MOVE = 0x03,
       MSG_MOUSE_BUTTON = 0x04,
       MSG_MOUSE_WHEEL = 0x05,
-      MSG_ABS_POSITION = 0x06
+      MSG_ABS_POSITION = 0x06,
+      MSG_GAMEPAD_SLOT = 0x07
     };
 
     std::atomic<bool> g_running {false};
@@ -256,6 +257,15 @@ namespace teknoparrot_pipe {
     push_message(std::move(buf));
   }
 
+  void send_gamepad_slot(int player, int xinput_index) {
+    std::vector<uint8_t> buf;
+    buf.reserve(3);
+    buf.push_back(MSG_GAMEPAD_SLOT);
+    buf.push_back(static_cast<uint8_t>(player));
+    buf.push_back(static_cast<uint8_t>(xinput_index));
+    push_message(std::move(buf));
+  }
+
   void send_mouse_wheel(int player, int32_t delta) {
     std::vector<uint8_t> buf;
     buf.reserve(6);
@@ -324,6 +334,31 @@ namespace teknoparrot_pipe {
     int overflow_slot = (overflow_counter.fetch_add(1) % 3) + 2;
     debug_log("assign_player_slot(\"" + client_address + "\"): OVERFLOW (3 slots all live), collision-risk slot " + std::to_string(overflow_slot));
     return overflow_slot;
+  }
+
+  bool has_free_player_slot(const std::string &client_address) {
+    std::lock_guard<std::mutex> lock(g_roster_mutex);
+
+    // Already holds a sticky slot from an earlier session - not a new occupant, so it always
+    // has "a slot" regardless of how full the other three are.
+    if (!client_address.empty() && g_client_slots.count(client_address)) {
+      return true;
+    }
+
+    for (int candidate = 2; candidate <= 4; ++candidate) {
+      bool taken = false;
+      for (const auto &entry : g_client_slots) {
+        if (entry.second == candidate && g_connected_players.count(candidate)) {
+          taken = true;
+          break;
+        }
+      }
+      if (!taken) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
 }  // namespace teknoparrot_pipe

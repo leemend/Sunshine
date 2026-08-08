@@ -22,6 +22,9 @@
 // local includes
 #include "config.h"
 #include "connection_gate.h"
+#ifdef _WIN32
+  #include "platform/windows/teknoparrot_pipe.h"
+#endif
 #include "display_device.h"
 #include "file_handler.h"
 #include "globals.h"
@@ -863,6 +866,33 @@ namespace nvhttp {
 
       return;
     }
+
+#ifdef _WIN32
+    // Reject a genuinely new client cleanly (a normal "couldn't connect" on their end) rather
+    // than letting them stream in with no free TeknoParrot player slot - which would otherwise
+    // silently collide them onto a slot someone else already occupies. Harmless no-op for
+    // non-TeknoParrot apps/sessions, since the roster this checks only ever gets populated by
+    // an actual TeknoParrot session's own input traffic.
+    //
+    // Must resolve the identity the exact same way stream.cpp's start() does before calling
+    // assign_player_slot() for real (prefer the client's uniqueid, falling back to its address
+    // for clients that don't send one, or send the known non-unique "0123456789ABCDEF"
+    // placeholder) - otherwise a reconnecting client's sticky slot would never be recognized
+    // here, since this check would be keyed on the wrong identity string.
+    auto uniqueid = get_arg(args, "uniqueid", "unknown");
+    auto addr_string = net::addr_to_normalized_string(request->remote_endpoint().address());
+    bool has_real_unique_id = uniqueid != "unknown"sv && uniqueid != "0123456789ABCDEF"sv;
+    std::string client_identity = has_real_unique_id ? uniqueid : addr_string;
+
+    if (!teknoparrot_pipe::has_free_player_slot(client_identity)) {
+      BOOST_LOG(info) << "Rejected launch request: no free TeknoParrot player slot"sv;
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "All player slots are currently full");
+
+      return;
+    }
+#endif
 
     auto appid = util::from_view(get_arg(args, "appid"));
 
