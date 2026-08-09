@@ -57,6 +57,31 @@ namespace teknoparrot_pipe {
                                                  ///< a client keeps its number across session
                                                  ///< restarts (settings screens, app switches)
                                                  ///< instead of drifting on every reconnect.
+    std::map<int, int> g_gamepad_slots;  ///< player -> real Windows XInput user index, guarded by
+                                          ///< g_roster_mutex like g_connected_players. Unlike
+                                          ///< Roster, a GamepadSlot message is only ever sent
+                                          ///< once, right when ViGEmBus first allocates the
+                                          ///< controller (see send_gamepad_slot()) - so without
+                                          ///< tracking it here too, a TeknoParrotUI reader that
+                                          ///< connects (or reconnects) *after* that one-shot
+                                          ///< message went out would never learn which XInput
+                                          ///< index belongs to which player, and every streamed
+                                          ///< player's gamepad would silently misattribute as the
+                                          ///< host's own local controller. Replayed alongside the
+                                          ///< roster in server_loop() for the same reason.
+
+    /**
+     * @brief Builds a serialized gamepad-slot message. Shared by send_gamepad_slot() and the
+     * connection-time replay in server_loop().
+     */
+    std::vector<uint8_t> make_gamepad_slot_message(int player, int xinput_index) {
+      std::vector<uint8_t> buf;
+      buf.reserve(3);
+      buf.push_back(MSG_GAMEPAD_SLOT);
+      buf.push_back(static_cast<uint8_t>(player));
+      buf.push_back(static_cast<uint8_t>(xinput_index));
+      return buf;
+    }
 
     /**
      * @brief Builds a serialized roster message. Shared by send_roster() and the connection-time
@@ -155,6 +180,17 @@ namespace teknoparrot_pipe {
               g_queue.push_back(make_roster_message(player, true));
             }
           }
+
+          // Same problem as the roster, but for gamepad-slot assignments: GamepadSlot is only
+          // ever sent once, at the moment ViGEmBus allocates the controller. A reader that
+          // wasn't connected yet at that moment (or reconnected after) would otherwise never
+          // learn the mapping - see g_gamepad_slots above.
+          if (!g_gamepad_slots.empty()) {
+            std::lock_guard<std::mutex> queue_lock(g_queue_mutex);
+            for (const auto &entry : g_gamepad_slots) {
+              g_queue.push_back(make_gamepad_slot_message(entry.first, entry.second));
+            }
+          }
         }
         g_queue_cv.notify_one();
 
@@ -231,6 +267,12 @@ namespace teknoparrot_pipe {
         g_connected_players.insert(player);
       } else {
         g_connected_players.erase(player);
+
+        // The controller (if any) that was allocated for this player's previous session is
+        // gone too - don't let a stale index get replayed to the next reader as if it still
+        // applied. If the player reconnects and gets a new controller, a fresh GamepadSlot
+        // message (and the tracking below) will repopulate this.
+        g_gamepad_slots.erase(player);
       }
     }
 
@@ -258,12 +300,12 @@ namespace teknoparrot_pipe {
   }
 
   void send_gamepad_slot(int player, int xinput_index) {
-    std::vector<uint8_t> buf;
-    buf.reserve(3);
-    buf.push_back(MSG_GAMEPAD_SLOT);
-    buf.push_back(static_cast<uint8_t>(player));
-    buf.push_back(static_cast<uint8_t>(xinput_index));
-    push_message(std::move(buf));
+    {
+      std::lock_guard<std::mutex> roster_lock(g_roster_mutex);
+      g_gamepad_slots[player] = xinput_index;
+    }
+
+    push_message(make_gamepad_slot_message(player, xinput_index));
   }
 
   void send_mouse_wheel(int player, int32_t delta) {

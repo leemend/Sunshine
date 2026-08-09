@@ -6,8 +6,10 @@
 
 // platform includes
 #include <Windows.h>
+#include <Xinput.h>
 
 // standard includes
+#include <bitset>
 #include <cmath>
 #include <string>
 #include <thread>
@@ -40,6 +42,53 @@ namespace platf {
 
   using client_t = util::safe_ptr<_VIGEM_CLIENT_T, vigem_free>;
   using target_t = util::safe_ptr<_VIGEM_TARGET_T, vigem_target_free>;
+
+  namespace {
+    // Loaded dynamically (rather than linked directly) purely to avoid touching the build's
+    // link step - this codebase doesn't otherwise use the raw XInput API anywhere, only
+    // ViGEm's client library, so there's no existing xinput*.lib dependency to piggyback on.
+    using XInputGetStateFn = DWORD(WINAPI *)(DWORD, XINPUT_STATE *);
+
+    XInputGetStateFn xinput_get_state_fn() {
+      static XInputGetStateFn fn = [] () -> XInputGetStateFn {
+        // Prefer the newest available; XInput 1.4 ships with Windows 8+, 9.1.0 is the
+        // compatibility redistributable present all the way back to Vista.
+        const wchar_t *candidates[] = {L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll"};
+        for (auto name : candidates) {
+          if (HMODULE mod = LoadLibraryW(name)) {
+            if (auto proc = reinterpret_cast<XInputGetStateFn>(GetProcAddress(mod, "XInputGetState"))) {
+              return proc;
+            }
+          }
+        }
+        return nullptr;
+      }();
+      return fn;
+    }
+
+    /**
+     * @brief Snapshot of which of the 4 real XInput user indices currently report a connected
+     * controller, straight from XInputGetState() - i.e. the ground truth every other consumer
+     * of a controller's slot (including TeknoParrotUI's own SharpDX.XInput polling) agrees on.
+     * Used as an independent cross-check against vigem_target_x360_get_user_index(), which was
+     * found to report a value that didn't match this ground truth when another controller was
+     * already occupying a lower slot - see the comment where this is used.
+     */
+    std::bitset<4> connected_xinput_slots() {
+      std::bitset<4> result;
+      auto get_state = xinput_get_state_fn();
+      if (!get_state) {
+        return result;
+      }
+      for (DWORD i = 0; i < 4; ++i) {
+        XINPUT_STATE state {};
+        if (get_state(i, &state) == ERROR_SUCCESS) {
+          result.set(i);
+        }
+      }
+      return result;
+    }
+  }  // namespace
 
   void CALLBACK x360_notify(
     client_t::pointer client,
@@ -261,6 +310,15 @@ namespace platf {
         gamepad.available_pointers = 0x3;
       }
 
+      // Snapshot which real XInput slots are already occupied *before* this new controller is
+      // added, so we can identify it afterward by which slot newly appears - see the comment
+      // below on why this, not vigem_target_x360_get_user_index(), is the source of truth for
+      // that. Taken here (before vigem_target_add()) rather than inside the detached thread
+      // below, since it has to reflect the world as it was right before this specific
+      // allocation, not whatever it happens to look like whenever that thread gets around to
+      // running.
+      auto slots_before_this_controller = gp_type == Xbox360Wired ? connected_xinput_slots() : std::bitset<4> {};
+
       auto status = vigem_target_add(client.get(), gamepad.gp.get());
       if (!VIGEM_SUCCESS(status)) {
         BOOST_LOG(error) << "Couldn't add Gamepad to ViGEm connection ["sv << util::hex(status).to_string_view() << ']';
@@ -274,15 +332,77 @@ namespace platf {
       // locally (XInput slots are handed out by Windows in allocation order, not by player).
       // ::input::get_active_player() reads the same thread-local value set just before this
       // allocation was kicked off (input.cpp's PSS_CONTROLLER_ARRIVAL_PACKET handler) - valid
-      // here because this whole call chain is synchronous, no thread hop in between.
+      // here because this whole call chain is synchronous, no thread hop in between - so it's
+      // captured into the lambda below by value, since the background thread runs after this
+      // function (and therefore this thread-local's validity here) has already returned.
       if (gp_type == Xbox360Wired) {
         if (auto player = ::input::get_active_player()) {
-          ULONG user_index = 0;
-          if (VIGEM_SUCCESS(vigem_target_x360_get_user_index(client.get(), gamepad.gp.get(), &user_index))) {
-            teknoparrot_pipe::send_gamepad_slot(player, static_cast<int>(user_index));
-          } else {
-            BOOST_LOG(warning) << "Couldn't query XInput user index for gamepad slot forwarding"sv;
-          }
+          // client_t/target_t are util::safe_ptr - move-only, unique-ownership wrappers, not
+          // shared_ptr - so they can't be captured by value into the detached thread below.
+          // Capturing the raw underlying handles instead is safe here: this thread only reads
+          // from them for a brief, bounded window (well under a second) right after successful
+          // allocation, so they're not going anywhere in practice - unlike holding onto them
+          // indefinitely, which would need real shared ownership.
+          PVIGEM_CLIENT raw_client = client.get();
+          PVIGEM_TARGET raw_target = gamepad.gp.get();
+
+          // vigem_target_x360_get_user_index() is NOT trustworthy here on its own: testing
+          // against a real setup (a physical controller already on slot 0, a streamed player's
+          // virtual controller landing on slot 1) showed it consistently reporting slot 0 for
+          // the *virtual* controller too - not a transient/stale reading that eventually
+          // settles on retry, but a stable, wrong answer that disagreed with XInputGetState(),
+          // SharpDX, and every other consumer of "what slot is this controller on". Rather than
+          // trust ViGEm's own query as ground truth, identify the new controller by which real
+          // XInput slot *newly* becomes connected relative to the "before" snapshot taken above
+          // - that's the same ground truth TeknoParrotUI's own XInput polling agrees with, since
+          // both go through the same XInputGetState() Windows API. Done on a detached thread,
+          // not inline here, since this function may run on a thread shared with other input
+          // processing - blocking it for up to ~1.5s would risk delaying other players' input
+          // too, not just this one controller's one-time setup.
+          std::thread([raw_client, raw_target, player, slots_before_this_controller]() {
+            Sleep(150);
+
+            int user_index = -1;
+            for (int attempt = 0; attempt < 20 && user_index < 0; ++attempt) {
+              if (attempt > 0) {
+                Sleep(75);
+              }
+
+              auto slots_now = connected_xinput_slots();
+              auto newly_connected = slots_now & ~slots_before_this_controller;
+
+              // Exactly one new slot appearing is the unambiguous case - almost always what
+              // happens. If more than one appears (a real controller happened to connect in
+              // this exact window too) we deliberately keep waiting/retrying rather than
+              // guessing which one is ours; if none has appeared yet, Windows just hasn't
+              // finished registering the virtual device yet.
+              if (newly_connected.count() == 1) {
+                for (int i = 0; i < 4; ++i) {
+                  if (newly_connected.test(i)) {
+                    user_index = i;
+                    break;
+                  }
+                }
+              }
+            }
+
+            if (user_index >= 0) {
+              teknoparrot_pipe::send_gamepad_slot(player, user_index);
+              return;
+            }
+
+            // Couldn't get an unambiguous answer from the ground-truth XInputGetState() diff -
+            // fall back to ViGEm's own query as a last resort. It's not reliably correct (see
+            // above), but a possibly-wrong slot forwarded to TeknoParrotUI is still better than
+            // silently forwarding nothing and leaving this player's gamepad unidentifiable.
+            ULONG queried_index = 0;
+            if (VIGEM_SUCCESS(vigem_target_x360_get_user_index(raw_client, raw_target, &queried_index))) {
+              BOOST_LOG(warning) << "Falling back to unverified ViGEm-reported XInput index "sv << queried_index << " for gamepad slot forwarding"sv;
+              teknoparrot_pipe::send_gamepad_slot(player, static_cast<int>(queried_index));
+            } else {
+              BOOST_LOG(warning) << "Couldn't determine XInput user index for gamepad slot forwarding after retrying"sv;
+            }
+          }).detach();
         }
       }
 
