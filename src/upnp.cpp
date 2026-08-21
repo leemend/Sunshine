@@ -5,6 +5,7 @@
 // standard includes
 #include <stddef.h>  // workaround for type_t error in miniupnpc 2.3.3, see https://github.com/miniupnp/miniupnp/commit/e263ab6f56c382e10fed31347ec68095d691a0e8
 #include <atomic>
+#include <cctype>
 #include <mutex>
 #include <thread>
 
@@ -51,6 +52,122 @@ namespace upnp {
 
   static std::size_t discard_http_response(char *, std::size_t size, std::size_t nmemb, void *) {
     return size * nmemb;
+  }
+
+  static std::size_t append_http_response(char *data, std::size_t size, std::size_t nmemb, void *userdata) {
+    auto *response = static_cast<std::string *>(userdata);
+    response->append(data, size * nmemb);
+    return size * nmemb;
+  }
+
+  static std::string trim_copy(std::string value) {
+    const auto first = std::find_if_not(value.begin(), value.end(), [](unsigned char c) {
+      return std::isspace(c);
+    });
+
+    const auto last = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char c) {
+      return std::isspace(c);
+    }).base();
+
+    if (first >= last) {
+      return {};
+    }
+
+    return std::string(first, last);
+  }
+
+  static std::string discover_local_ipv4_address() {
+    try {
+      boost::asio::io_context io;
+      boost::asio::ip::udp::socket socket(io);
+      boost::system::error_code ec;
+
+      socket.open(boost::asio::ip::udp::v4(), ec);
+      if (ec) {
+        return {};
+      }
+
+      // No packet needs to be sent. Connecting a UDP socket simply lets the OS
+      // choose the interface/address it would use for normal Internet traffic.
+      socket.connect(
+        boost::asio::ip::udp::endpoint(
+          boost::asio::ip::make_address_v4("1.1.1.1"),
+          53
+        ),
+        ec
+      );
+
+      if (ec) {
+        return {};
+      }
+
+      const auto endpoint = socket.local_endpoint(ec);
+      if (ec || !endpoint.address().is_v4() || endpoint.address().is_loopback()) {
+        return {};
+      }
+
+      return endpoint.address().to_string();
+    } catch (const std::exception &e) {
+      BOOST_LOG(debug) << "Unable to determine local IPv4 address: "sv << e.what();
+      return {};
+    }
+  }
+
+  static std::string discover_public_ipv4_address() {
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+      return {};
+    }
+
+    std::string response;
+
+    curl_easy_setopt(curl, CURLOPT_URL, "https://api.ipify.org");
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 3000L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 5000L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_http_response);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Sunshine Connectivity Diagnostics");
+
+    const CURLcode result = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+
+    if (result != CURLE_OK) {
+      BOOST_LOG(debug) << "Unable to determine public IPv4 address: "sv << curl_easy_strerror(result);
+      return {};
+    }
+
+    response = trim_copy(std::move(response));
+
+    boost::system::error_code ec;
+    const auto address = boost::asio::ip::make_address(response, ec);
+    if (ec || !address.is_v4()) {
+      BOOST_LOG(debug) << "Public IP lookup returned an invalid IPv4 address"sv;
+      return {};
+    }
+
+    return address.to_string();
+  }
+
+  static void refresh_host_network_addresses(bool refresh_public_address) {
+    const auto local_address = discover_local_ipv4_address();
+
+    std::string public_address;
+    if (refresh_public_address) {
+      public_address = discover_public_ipv4_address();
+    }
+
+    std::lock_guard lock(diagnostics_mutex);
+
+    if (!local_address.empty()) {
+      diagnostics.lan_address = local_address;
+    }
+
+    if (!public_address.empty()) {
+      diagnostics.external_address = public_address;
+    }
+
+    diagnostics.last_updated = std::chrono::system_clock::now();
   }
 
   struct internet_test_result_t {
@@ -392,6 +509,13 @@ namespace upnp {
       return result;
     }
 
+    // A live Moonlight session is stronger evidence than a synthetic probe.
+    // Do not interfere with any active stream sockets just to run diagnostics.
+    if (!rtsp_stream::active_sessions().empty()) {
+      result.overall = internet_access_e::working;
+      return result;
+    }
+
     result.tcp_47984 = test_loopback_http_port(
       "https://loopback-v2.moonlight-stream.org:37984/",
       true
@@ -407,11 +531,13 @@ namespace upnp {
       37998,
       47998
     );
+
     result.udp_47999 = test_loopback_udp_port(
       stream::udp_connectivity_probe_e::audio,
       37999,
       47999
     );
+
     result.udp_48000 = test_loopback_udp_port(
       stream::udp_connectivity_probe_e::control,
       38000,
@@ -425,7 +551,7 @@ namespace upnp {
     // The HTTPS relay can fail the initial connection when its callback to
     // Sunshine TCP 47984 is blocked. If either companion relay test proves
     // the Moonlight relay service itself is available, classify this as a
-    // blocked host port rather than an unavailable test service.
+    // failed inbound probe rather than an unavailable test service.
     if (result.tcp_47984 == port_reachability_e::unavailable &&
         (result.tcp_47989 != port_reachability_e::unavailable ||
          result.tcp_48010 != port_reachability_e::unavailable)) {
@@ -475,9 +601,26 @@ namespace upnp {
       return;
     }
 
+    const bool active_stream = !rtsp_stream::active_sessions().empty();
+
+    if (active_stream) {
+      {
+        std::lock_guard lock(diagnostics_mutex);
+        diagnostics.internet_access = internet_access_e::working;
+        apply_internet_test_result(diagnostics.mappings, internet_test_result_t {});
+        diagnostics.last_updated = std::chrono::system_clock::now();
+      }
+
+      internet_test_running = false;
+      refresh_tray_diagnostics();
+      return;
+    }
+
     {
       std::lock_guard lock(diagnostics_mutex);
+
       diagnostics.internet_access = internet_access_e::testing;
+
       set_port_reachability(diagnostics.mappings, "TCP", "47984", port_reachability_e::testing);
       set_port_reachability(diagnostics.mappings, "TCP", "47989", port_reachability_e::testing);
       set_port_reachability(diagnostics.mappings, "UDP", "47998", port_reachability_e::testing);
@@ -490,6 +633,9 @@ namespace upnp {
     refresh_tray_diagnostics();
 
     std::thread([]() {
+      // Keep host/public addressing useful even on routers that do not support UPnP.
+      refresh_host_network_addresses(true);
+
       const auto internet_test = test_internet_access();
 
       {
@@ -794,15 +940,25 @@ namespace upnp {
         if (!device || err) {
           BOOST_LOG(warning) << "Couldn't discover any IPv4 UPNP devices"sv;
 
+          refresh_host_network_addresses(true);
+
           {
             std::lock_guard lock(diagnostics_mutex);
             diagnostics.igd_found = false;
             diagnostics.igd_connected = false;
-            diagnostics.lan_address.clear();
-            diagnostics.external_address.clear();
             diagnostics.igd_url.clear();
             diagnostics.mappings = default_mapping_statuses();
-            diagnostics.internet_access = internet_access_e::not_tested;
+            diagnostics.last_updated = std::chrono::system_clock::now();
+          }
+
+          // UPnP availability and real Internet reachability are independent.
+          // Manual port forwarding may work perfectly even when no IGD exists.
+          const auto internet_test = test_internet_access();
+
+          {
+            std::lock_guard lock(diagnostics_mutex);
+            diagnostics.internet_access = internet_test.overall;
+            apply_internet_test_result(diagnostics.mappings, internet_test);
             diagnostics.last_updated = std::chrono::system_clock::now();
           }
 
@@ -823,15 +979,23 @@ namespace upnp {
         if (status != 1 && status != 2) {
           BOOST_LOG(error) << status_string(status);
 
+          refresh_host_network_addresses(true);
+
           {
             std::lock_guard lock(diagnostics_mutex);
             diagnostics.igd_found = status != 0;
             diagnostics.igd_connected = false;
-            diagnostics.lan_address.clear();
-            diagnostics.external_address.clear();
             diagnostics.igd_url.clear();
             diagnostics.mappings = default_mapping_statuses();
-            diagnostics.internet_access = internet_access_e::not_tested;
+            diagnostics.last_updated = std::chrono::system_clock::now();
+          }
+
+          const auto internet_test = test_internet_access();
+
+          {
+            std::lock_guard lock(diagnostics_mutex);
+            diagnostics.internet_access = internet_test.overall;
+            apply_internet_test_result(diagnostics.mappings, internet_test);
             diagnostics.last_updated = std::chrono::system_clock::now();
           }
 
@@ -856,6 +1020,7 @@ namespace upnp {
           BOOST_LOG(debug) << "Router external IPv4 address: "sv << external_addr_str;
         } else {
           BOOST_LOG(debug) << "Unable to query router external IPv4 address: "sv << external_addr_status;
+          external_addr_str = discover_public_ipv4_address();
         }
 
         std::vector<mapping_status_t> mapping_results;
@@ -945,6 +1110,9 @@ namespace upnp {
       diagnostics.last_updated = std::chrono::system_clock::now();
     }
 
+    // Populate basic host addressing independently from UPnP so the tray remains
+    // useful on manual-port-forwarding routers too.
+    refresh_host_network_addresses(true);
     refresh_tray_diagnostics();
 
     if (!config::sunshine.flags[config::flag::UPNP]) {

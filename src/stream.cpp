@@ -1915,6 +1915,21 @@ namespace stream {
     ctx.control_thread.join();
     BOOST_LOG(debug) << "All broadcasting threads ended"sv;
 
+    // The live stream sockets/listener are no longer usable for connectivity
+    // diagnostics. Clear all probe state so the next idle connectivity refresh
+    // falls back to temporary listeners instead of waiting on dead stream sockets.
+    udp_video_probe_armed = false;
+    udp_video_probe_seen = false;
+    udp_video_probe_ready = false;
+
+    udp_audio_probe_armed = false;
+    udp_audio_probe_seen = false;
+    udp_audio_probe_ready = false;
+
+    udp_control_probe_armed = false;
+    udp_control_probe_seen = false;
+    udp_control_probe_ready = false;
+
     broadcast_shutdown_event->reset();
   }
 

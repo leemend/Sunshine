@@ -10,8 +10,8 @@ if(NOT DOTNET_EXECUTABLE)
 endif()
 
 set(CPACK_WIX_VERSION 4)
-set(WIX_VERSION 4.0.4)
-set(WIX_UI_VERSION 4.0.4)  # extension versioning is independent of the WiX version
+set(WIX_VERSION 4.0.6)
+set(WIX_UI_VERSION 4.0.6)  # extension versioning is independent of the WiX version
 set(WIX_BUILD_PARENT_DIRECTORY "${CMAKE_BINARY_DIR}/wix_packaging")
 set(WIX_BUILD_DIRECTORY "${CPACK_PACKAGE_DIRECTORY}/_CPack_Packages/win64/WIX")
 
