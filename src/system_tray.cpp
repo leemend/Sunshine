@@ -32,9 +32,11 @@
   #include <atomic>
   #include <chrono>
   #include <csignal>
+  #include <cstdint>
   #include <format>
   #include <string>
   #include <thread>
+  #include <vector>
 
   // lib includes
   #include <boost/filesystem.hpp>
@@ -46,15 +48,140 @@
   #include "connection_gate.h"
   #include "display_device.h"
   #include "logging.h"
+  #include "nvhttp.h"
   #include "platform/common.h"
   #include "process.h"
+  #include "rtsp.h"
   #include "src/entry_handler.h"
+  #include "stream.h"
 
 using namespace std::literals;
 
 // system_tray namespace
 namespace system_tray {
   static std::atomic tray_initialized = false;
+
+  static std::vector<std::string> connection_menu_labels;
+  static std::vector<tray_menu> connection_menu_items;
+  static std::vector<tray_menu> disconnect_menu_items;
+
+  struct disconnect_and_unpair_context_t {
+    std::uint32_t session_id;
+    std::string client_uuid;
+  };
+
+  static std::vector<disconnect_and_unpair_context_t> disconnect_and_unpair_contexts;
+
+  void tray_disconnect_session_cb(struct tray_menu *item) {
+    auto session_id = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(item->context));
+
+    if (rtsp_stream::terminate_session(session_id)) {
+      BOOST_LOG(info) << "Disconnected streaming session " << session_id << " from system tray";
+    } else {
+      BOOST_LOG(warning) << "Unable to disconnect streaming session " << session_id << " from system tray";
+    }
+  }
+
+  void tray_disconnect_and_unpair_session_cb(struct tray_menu *item) {
+    auto *context = static_cast<disconnect_and_unpair_context_t *>(item->context);
+
+    if (!context) {
+      BOOST_LOG(warning) << "Unable to disconnect and unpair session: missing tray context";
+      return;
+    }
+
+    const auto session_id = context->session_id;
+    const auto client_uuid = context->client_uuid;
+
+    if (rtsp_stream::terminate_session(session_id)) {
+      BOOST_LOG(info) << "Disconnected streaming session " << session_id << " from system tray";
+    } else {
+      BOOST_LOG(warning) << "Unable to disconnect streaming session " << session_id << " from system tray";
+    }
+
+    if (!client_uuid.empty()) {
+      if (nvhttp::unpair_client(client_uuid)) {
+        BOOST_LOG(info) << "Unpaired client " << client_uuid << " from system tray";
+      } else {
+        BOOST_LOG(warning) << "Unable to unpair client " << client_uuid << " from system tray";
+      }
+    } else {
+      BOOST_LOG(warning) << "Unable to unpair client: no paired client UUID associated with session";
+    }
+  }
+
+  void rebuild_current_connections_menu() {
+    auto sessions = rtsp_stream::active_sessions();
+
+    std::vector<std::string> new_labels;
+    std::vector<tray_menu> new_connection_items;
+    std::vector<tray_menu> new_disconnect_items;
+    std::vector<disconnect_and_unpair_context_t> new_disconnect_and_unpair_contexts;
+
+    if (sessions.empty()) {
+      new_labels.emplace_back("No active connections");
+
+      new_connection_items.push_back({
+        .text = new_labels.back().c_str(),
+        .disabled = 1,
+      });
+
+      new_connection_items.push_back({.text = nullptr});
+    } else {
+      new_labels.reserve(sessions.size());
+      new_connection_items.reserve(sessions.size() + 1);
+      new_disconnect_items.reserve((sessions.size() * 3) + 1);
+      new_disconnect_and_unpair_contexts.reserve(sessions.size());
+
+      for (const auto &session : sessions) {
+        auto label = session.address;
+
+        if (!session.client_name.empty()) {
+          label = std::format("{} ({})", session.client_name, session.address);
+        } else if (!session.client_unique_id.empty() &&
+                  session.client_unique_id != "unknown" &&
+                  session.client_unique_id != "0123456789ABCDEF") {
+          label = std::format("{} ({})", session.client_unique_id, session.address);
+        }
+
+        new_labels.emplace_back(std::move(label));
+
+        const auto disconnect_index = new_disconnect_items.size();
+
+        new_disconnect_and_unpair_contexts.push_back({
+          .session_id = session.id,
+          .client_uuid = session.client_uuid,
+        });
+
+        new_disconnect_items.push_back({
+          .text = "Disconnect",
+          .cb = tray_disconnect_session_cb,
+          .context = reinterpret_cast<void *>(static_cast<std::uintptr_t>(session.id)),
+        });
+
+        new_disconnect_items.push_back({
+          .text = "Disconnect & Unpair",
+          .disabled = session.client_uuid.empty() ? 1 : 0,
+          .cb = tray_disconnect_and_unpair_session_cb,
+          .context = &new_disconnect_and_unpair_contexts.back(),
+        });
+
+        new_disconnect_items.push_back({.text = nullptr});
+
+        new_connection_items.push_back({
+          .text = new_labels.back().c_str(),
+          .submenu = &new_disconnect_items[disconnect_index],
+        });
+      }
+
+      new_connection_items.push_back({.text = nullptr});
+    }
+
+    connection_menu_labels.swap(new_labels);
+    connection_menu_items.swap(new_connection_items);
+    disconnect_menu_items.swap(new_disconnect_items);
+    disconnect_and_unpair_contexts.swap(new_disconnect_and_unpair_contexts);
+  }
 
   void tray_open_ui_cb([[maybe_unused]] struct tray_menu *item) {
     BOOST_LOG(info) << "Opening UI from system tray"sv;
@@ -149,6 +276,7 @@ namespace system_tray {
              {.text = nullptr}
            }},
         {.text = "Connections", .submenu = connection_gate_submenu},
+        {.text = "Current Connections"},
         {.text = "-"},
   // Currently display device settings are only supported on Windows
   #ifdef _WIN32
@@ -161,6 +289,22 @@ namespace system_tray {
     .iconPathCount = 4,
     .allIconPaths = {TRAY_ICON, TRAY_ICON_LOCKED, TRAY_ICON_PLAYING, TRAY_ICON_PAUSING},
   };
+
+  void refresh_current_connections() {
+    // Keep the previous menu storage alive until tray_update() has replaced
+    // the native menu, since it may still reference these strings/items/contexts.
+    auto old_labels = std::move(connection_menu_labels);
+    auto old_connection_items = std::move(connection_menu_items);
+    auto old_disconnect_items = std::move(disconnect_menu_items);
+    auto old_disconnect_and_unpair_contexts = std::move(disconnect_and_unpair_contexts);
+    
+    rebuild_current_connections_menu();
+    tray.menu[4].submenu = connection_menu_items.data();
+
+    if (tray_initialized) {
+      tray_update(&tray);
+    }
+  }
 
   void sync_connection_gate_menu() {
     auto mode = connection_gate::current_mode();
@@ -297,6 +441,8 @@ namespace system_tray {
 
     tray.icon = tray.allIconPaths[0];
   #endif
+
+    refresh_current_connections();
 
     if (tray_init(&tray) < 0) {
       BOOST_LOG(warning) << "Failed to create system tray"sv;

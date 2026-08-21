@@ -414,7 +414,8 @@ namespace stream {
                                     ///< by the Windows TeknoParrot identity bridge to keep a
                                     ///< client's player number stable across session restarts
                                     ///< regardless of IP changes.
-
+    std::string client_name;
+    std::string client_uuid;
     safe::mail_raw_t::event_t<bool> shutdown_event;
     safe::signal_t controlEnd;
 
@@ -1911,6 +1912,16 @@ namespace stream {
       return session.state.load(std::memory_order_relaxed);
     }
 
+    session_info_t get_info(session_t &session) {
+      return {
+        .id = session.launch_session_id,
+        .client_unique_id = session.client_unique_id,
+        .client_name = session.client_name,
+        .client_uuid = session.client_uuid,
+        .address = session.control.expected_peer_address,
+      };
+    }
+
     void stop(session_t &session) {
       while_starting_do_nothing(session.state);
       auto expected = state_e::RUNNING;
@@ -2045,6 +2056,8 @@ namespace stream {
       session->config = config;
 
       session->client_unique_id = launch_session.unique_id;
+      session->client_name = launch_session.client_name;
+      session->client_uuid = launch_session.client_uuid;
       session->control.connect_data = launch_session.control_connect_data;
       session->control.feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback);
       session->control.hdr_queue = mail->event<video::hdr_info_t>(mail::hdr);
