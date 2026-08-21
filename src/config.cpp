@@ -533,7 +533,7 @@ namespace config {
     {},  // virtual_sink
     true,  // stream audio
     true,  // install_steam_drivers
-    false,  // force_host_audio
+    true,  // force_host_audio
   };
 
   stream_t stream {
@@ -607,6 +607,109 @@ namespace config {
     "closed"s,  // connection_gate_mode - fail closed by default, matching the whole point of the feature
     210,  // connection_gate_auto_close_seconds (3 minutes 30 seconds)
   };
+
+  void set_scalar_config_value(
+    std::string &content,
+    std::string_view key,
+    std::string_view value
+  ) {
+    std::size_t line_start = 0;
+
+    while (line_start < content.size()) {
+      auto line_end = content.find_first_of("\r\n", line_start);
+      if (line_end == std::string::npos) {
+        line_end = content.size();
+      }
+
+      std::string_view line {
+        content.data() + line_start,
+        line_end - line_start
+      };
+
+      auto comment_pos = line.find('#');
+      auto effective_line = line.substr(0, comment_pos);
+
+      auto eq_pos = effective_line.find('=');
+
+      if (eq_pos != std::string_view::npos) {
+        auto name = effective_line.substr(0, eq_pos);
+
+        while (!name.empty() && (name.front() == ' ' || name.front() == '\t')) {
+          name.remove_prefix(1);
+        }
+
+        while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) {
+          name.remove_suffix(1);
+        }
+
+        if (name == key) {
+          content.replace(
+            line_start,
+            line_end - line_start,
+            std::string(key) + " = " + std::string(value)
+          );
+
+          return;
+        }
+      }
+
+      if (line_end == content.size()) {
+        break;
+      }
+
+      line_start = line_end + 1;
+
+      if (
+        content[line_end] == '\r' &&
+        line_start < content.size() &&
+        content[line_start] == '\n'
+      ) {
+        ++line_start;
+      }
+    }
+
+    if (!content.empty() && content.back() != '\n' && content.back() != '\r') {
+      content += '\n';
+    }
+
+    content += std::string(key) + " = " + std::string(value) + '\n';
+  }
+
+  void apply_teknoparrot_defaults_migration() {
+    const fs::path migration_marker =
+      platf::appdata() / ".teknoparrot_defaults_v1";
+
+    // Apply defaults once but then respect user's choice
+    if (fs::exists(migration_marker)) {
+      return;
+    }
+
+    auto config_content =
+      file_handler::read_file(sunshine.config_file.c_str());
+
+    set_scalar_config_value(config_content, "upnp", "true");
+    set_scalar_config_value(config_content, "force_host_audio", "true");
+
+    file_handler::write_file(
+      sunshine.config_file.c_str(),
+      config_content
+    );
+
+    // Only create marker after success of updating sunshine.conf.
+    std::ofstream marker_stream {migration_marker};
+
+    if (!marker_stream) {
+      BOOST_LOG(warning)
+        << "Unable to create TeknoParrot defaults migration marker.";
+      return;
+    }
+
+    marker_stream << "1\n";
+
+    BOOST_LOG(info)
+      << "Applied TeknoParrot defaults migration: "
+        "UPnP and host audio enabled.";
+  }
 
   bool endline(char ch) {
     return ch == '\r' || ch == '\n';
@@ -1344,7 +1447,7 @@ namespace config {
     string_restricted_f(vars, "address_family", sunshine.address_family, {"ipv4"sv, "both"sv});
     string_f(vars, "bind_address", sunshine.bind_address);
 
-    bool upnp = false;
+    bool upnp = true;
     bool_f(vars, "upnp"s, upnp);
 
     if (upnp) {
@@ -1484,6 +1587,10 @@ namespace config {
       if (!fs::exists(sunshine.config_file)) {
         std::ofstream {sunshine.config_file};
       }
+
+      // Apply our TeknoParrot defaults once
+      // This also migrates existing Sunshine installations
+      apply_teknoparrot_defaults_migration();
 
       // Read config file
       auto vars = parse_config(file_handler::read_file(sunshine.config_file.c_str()));
