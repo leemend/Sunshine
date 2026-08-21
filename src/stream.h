@@ -5,6 +5,8 @@
 #pragma once
 
 // standard includes
+#include <cstdint>
+#include <string>
 #include <utility>
 
 // lib includes
@@ -21,6 +23,14 @@ namespace stream {
   constexpr auto AUDIO_STREAM_PORT = 11;
 
   struct session_t;
+
+  struct session_info_t {
+    std::uint32_t id;
+    std::string client_unique_id;
+    std::string client_name;
+    std::string client_uuid;
+    std::string address;
+  };
 
   struct config_t {
     audio::config_t audio;
@@ -51,5 +61,6 @@ namespace stream {
     void stop(session_t &session);
     void join(session_t &session);
     state_e state(session_t &session);
+    session_info_t get_info(session_t &session);
   }  // namespace session
 }  // namespace stream

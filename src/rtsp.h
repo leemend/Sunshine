@@ -6,10 +6,15 @@
 
 // standard includes
 #include <atomic>
+#include <vector>
 
 // local includes
 #include "crypto.h"
 #include "thread_safe.h"
+
+namespace stream {
+  struct session_info_t;
+}
 
 namespace rtsp_stream {
   constexpr auto RTSP_SETUP_PORT = 21;
@@ -25,6 +30,8 @@ namespace rtsp_stream {
 
     bool host_audio;
     std::string unique_id;
+    std::string client_name;
+    std::string client_uuid;
     int width;
     int height;
     int fps;
@@ -54,6 +61,19 @@ namespace rtsp_stream {
    * @return Count of active sessions.
    */
   int session_count();
+
+  /**
+   * @brief Get information about currently active streaming sessions.
+   * @return A snapshot of the active sessions.
+   */
+  std::vector<stream::session_info_t> active_sessions();
+
+  /**
+   * @brief Terminates a single running streaming session.
+   * @param session_id Launch session ID of the session to terminate.
+   * @return True if a matching session was found and stopped.
+   */
+  bool terminate_session(std::uint32_t session_id);
 
   /**
    * @brief Terminates all running streaming sessions.

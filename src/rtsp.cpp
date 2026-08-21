@@ -32,8 +32,13 @@ extern "C" {
 #include "stream.h"
 #include "sync.h"
 #include "video.h"
+
 #ifdef _WIN32
   #include "platform/windows/teknoparrot_pipe.h"
+#endif
+
+#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
+  #include "system_tray.h"
 #endif
 
 namespace asio = boost::asio;
@@ -548,6 +553,43 @@ namespace rtsp_stream {
       return (int) _session_slots->size();
     }
 
+    std::vector<stream::session_info_t> active_sessions() {
+      auto lg = _session_slots.lock();
+
+      std::vector<stream::session_info_t> sessions;
+      sessions.reserve(_session_slots->size());
+
+      for (auto &slot : *_session_slots) {
+        if (stream::session::state(*slot) == stream::session::state_e::RUNNING) {
+          sessions.emplace_back(stream::session::get_info(*slot));
+        }
+      }
+
+      return sessions;
+    }
+
+    bool terminate_session(std::uint32_t session_id) {
+      std::shared_ptr<stream::session_t> target;
+
+      {
+        auto lg = _session_slots.lock();
+
+        for (auto &slot : *_session_slots) {
+          if (stream::session::get_info(*slot).id == session_id) {
+            target = slot;
+            break;
+          }
+        }
+      }
+
+      if (!target) {
+        return false;
+      }
+
+      stream::session::stop(*target);
+      return true;
+    }
+
     safe::event_t<std::shared_ptr<launch_session_t>> launch_event;
 
     /**
@@ -558,19 +600,31 @@ namespace rtsp_stream {
      * @examples_end
      */
     void clear(bool all = true) {
-      auto lg = _session_slots.lock();
+      bool sessions_removed = false;
 
-      for (auto i = _session_slots->begin(); i != _session_slots->end();) {
-        auto &slot = *(*i);
-        if (all || stream::session::state(slot) == stream::session::state_e::STOPPING) {
-          stream::session::stop(slot);
-          stream::session::join(slot);
+      {
+        auto lg = _session_slots.lock();
 
-          i = _session_slots->erase(i);
-        } else {
-          i++;
+        for (auto i = _session_slots->begin(); i != _session_slots->end();) {
+          auto &slot = *(*i);
+
+          if (all || stream::session::state(slot) == stream::session::state_e::STOPPING) {
+            stream::session::stop(slot);
+            stream::session::join(slot);
+
+            i = _session_slots->erase(i);
+            sessions_removed = true;
+          } else {
+            i++;
+          }
         }
       }
+
+    #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
+      if (sessions_removed) {
+        system_tray::refresh_current_connections();
+      }
+    #endif
     }
 
     /**
@@ -641,6 +695,14 @@ namespace rtsp_stream {
     server.clear(false);
 
     return server.session_count();
+  }
+
+  std::vector<stream::session_info_t> active_sessions() {
+    return server.active_sessions();
+  }
+
+  bool terminate_session(std::uint32_t session_id) {
+    return server.terminate_session(session_id);
   }
 
   void terminate_sessions() {
@@ -1129,6 +1191,10 @@ namespace rtsp_stream {
       respond(sock, session, &option, 500, "Internal Server Error", req->sequenceNumber, {});
       return;
     }
+
+    #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
+        system_tray::refresh_current_connections();
+    #endif
 
     respond(sock, session, &option, 200, "OK", req->sequenceNumber, {});
   }

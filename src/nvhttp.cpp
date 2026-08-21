@@ -8,7 +8,9 @@
 // standard includes
 #include <filesystem>
 #include <format>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 // lib includes
@@ -63,7 +65,7 @@ namespace nvhttp {
       context.use_private_key_file(private_key_file, boost::asio::ssl::context::pem);
     }
 
-    std::function<int(SSL *)> verify;
+    std::function<int(SSL *, const std::shared_ptr<Request> &)> verify;
     std::function<void(std::shared_ptr<Response>, std::shared_ptr<Request>)> on_verify_failed;
 
   protected:
@@ -108,7 +110,7 @@ namespace nvhttp {
               return;
             }
             if (!ec) {
-              if (verify && !verify(session->connection->socket->native_handle())) {
+              if (verify && !verify(session->connection->socket->native_handle(), session->request)) {
                 this->write(session, on_verify_failed);
               } else {
                 this->read(session);
@@ -153,6 +155,34 @@ namespace nvhttp {
   using req_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SunshineHTTPS>::Request>;
   using resp_http_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTP>::Response>;
   using req_http_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTP>::Request>;
+
+  struct authenticated_client_t {
+    std::weak_ptr<https_server_t::Request> request;
+    std::string name;
+    std::string uuid;
+  };
+
+  std::mutex authenticated_clients_mutex;
+  std::unordered_map<const https_server_t::Request *, authenticated_client_t> authenticated_clients;
+
+  bool take_authenticated_client(
+    const req_https_t &request,
+    std::string &name,
+    std::string &uuid
+  ) {
+    std::lock_guard lock(authenticated_clients_mutex);
+
+    auto it = authenticated_clients.find(request.get());
+    if (it == authenticated_clients.end()) {
+      return false;
+    }
+
+    name = std::move(it->second.name);
+    uuid = std::move(it->second.uuid);
+
+    authenticated_clients.erase(it);
+    return true;
+  }
 
   enum class op_e {
     ADD,  ///< Add certificate
@@ -908,6 +938,12 @@ namespace nvhttp {
     host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     auto launch_session = make_launch_session(host_audio, args);
 
+    take_authenticated_client(
+      request,
+      launch_session->client_name,
+      launch_session->client_uuid
+    );
+
     if (rtsp_stream::session_count() == 0) {
       // The display should be restored in case something fails as there are no other sessions.
       revert_display_configuration = true;
@@ -1033,6 +1069,12 @@ namespace nvhttp {
 
     const auto launch_session = make_launch_session(host_audio, args);
 
+    take_authenticated_client(
+      request,
+      launch_session->client_name,
+      launch_session->client_uuid
+    );
+
     if (no_active_sessions) {
       // We want to prepare display only if there are no active sessions at
       // the moment. This should be done before probing encoders as it could
@@ -1151,7 +1193,7 @@ namespace nvhttp {
     http_server_t http_server;
 
     // Verify certificates after establishing connection
-    https_server.verify = [add_cert](SSL *ssl) {
+    https_server.verify = [add_cert](SSL *ssl, const std::shared_ptr<https_server_t::Request> &request) {
       crypto::x509_t x509 {
 #if OPENSSL_VERSION_MAJOR >= 3
         SSL_get1_peer_certificate(ssl)
@@ -1196,6 +1238,29 @@ namespace nvhttp {
       if (!is_client_enabled(pem)) {
         BOOST_LOG(info) << "Client is disabled -- denied"sv;
         return verified;
+      }
+
+      {
+        std::lock_guard lock(authenticated_clients_mutex);
+
+        for (auto it = authenticated_clients.begin(); it != authenticated_clients.end();) {
+          if (it->second.request.expired()) {
+            it = authenticated_clients.erase(it);
+          } else {
+            ++it;
+          }
+        }
+
+        for (const auto &named_cert : client_root.named_devices) {
+          if (named_cert.cert == pem) {
+            authenticated_clients[request.get()] = {
+              .request = request,
+              .name = named_cert.name,
+              .uuid = named_cert.uuid,
+            };
+            break;
+          }
+        }
       }
 
       verified = 1;

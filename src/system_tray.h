@@ -51,6 +51,11 @@ namespace system_tray {
   void tray_quit_cb([[maybe_unused]] struct tray_menu *item);
 
   /**
+   * @brief Refreshes the current connections tray submenu.
+   */
+  void refresh_current_connections();
+
+  /**
    * @brief Initializes the system tray without starting a loop.
    * @return 0 if initialization was successful, non-zero otherwise.
    */
