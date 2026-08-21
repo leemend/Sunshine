@@ -57,6 +57,9 @@ namespace upnp {
     internet_access_e overall = internet_access_e::not_tested;
     port_reachability_e tcp_47984 = port_reachability_e::not_tested;
     port_reachability_e tcp_47989 = port_reachability_e::not_tested;
+    port_reachability_e udp_47998 = port_reachability_e::not_tested;
+    port_reachability_e udp_47999 = port_reachability_e::not_tested;
+    port_reachability_e udp_48000 = port_reachability_e::not_tested;
     port_reachability_e tcp_48010 = port_reachability_e::not_tested;
   };
 
@@ -111,6 +114,9 @@ namespace upnp {
 
     set_port_reachability(mappings, "TCP", "47984", result.tcp_47984);
     set_port_reachability(mappings, "TCP", "47989", result.tcp_47989);
+    set_port_reachability(mappings, "UDP", "47998", result.udp_47998);
+    set_port_reachability(mappings, "UDP", "47999", result.udp_47999);
+    set_port_reachability(mappings, "UDP", "48000", result.udp_48000);
     set_port_reachability(mappings, "TCP", "48010", result.tcp_48010);
   }
 
@@ -207,6 +213,176 @@ namespace upnp {
     return port_reachability_e::blocked;
   }
 
+  static port_reachability_e test_loopback_udp_port(
+    stream::udp_connectivity_probe_e probe,
+    std::uint16_t relay_port,
+    std::uint16_t local_port
+  ) {
+    constexpr std::string_view test_payload = "moonlight-test"sv;
+    constexpr auto send_interval = 200ms;
+    constexpr auto poll_interval = 25ms;
+    constexpr auto final_wait = 2s;
+
+    try {
+      boost::asio::io_context io;
+      boost::asio::ip::udp::resolver resolver(io);
+      const auto results = resolver.resolve(
+        boost::asio::ip::udp::v4(),
+        "loopback-v2.moonlight-stream.org",
+        std::to_string(relay_port)
+      );
+
+      if (results.empty()) {
+        return port_reachability_e::unavailable;
+      }
+
+      const auto relay_endpoint = results.begin()->endpoint();
+
+      if (stream::udp_connectivity_probe_ready(probe)) {
+        stream::arm_udp_connectivity_probe(probe);
+
+        boost::asio::ip::udp::socket sender(io);
+        boost::system::error_code ec;
+        sender.open(boost::asio::ip::udp::v4(), ec);
+        if (ec) {
+          stream::cancel_udp_connectivity_probe(probe);
+          return port_reachability_e::unavailable;
+        }
+
+        for (int i = 0; i < 5; ++i) {
+          sender.send_to(boost::asio::buffer(test_payload), relay_endpoint, 0, ec);
+          if (ec) {
+            stream::cancel_udp_connectivity_probe(probe);
+            return port_reachability_e::unavailable;
+          }
+
+          const auto send_deadline = std::chrono::steady_clock::now() + send_interval;
+          while (std::chrono::steady_clock::now() < send_deadline) {
+            if (stream::udp_connectivity_probe_received(probe)) {
+              stream::cancel_udp_connectivity_probe(probe);
+              return port_reachability_e::reachable;
+            }
+
+            std::this_thread::sleep_for(poll_interval);
+          }
+        }
+
+        const auto callback_deadline = std::chrono::steady_clock::now() + final_wait;
+        while (std::chrono::steady_clock::now() < callback_deadline) {
+          if (stream::udp_connectivity_probe_received(probe)) {
+            stream::cancel_udp_connectivity_probe(probe);
+            return port_reachability_e::reachable;
+          }
+
+          std::this_thread::sleep_for(poll_interval);
+        }
+
+        stream::cancel_udp_connectivity_probe(probe);
+        return port_reachability_e::blocked;
+      }
+
+      boost::asio::ip::udp::socket listener(io);
+      boost::asio::ip::udp::socket sender(io);
+      boost::system::error_code ec;
+
+      listener.open(boost::asio::ip::udp::v4(), ec);
+      if (ec) {
+        return port_reachability_e::unavailable;
+      }
+
+      listener.bind(
+        boost::asio::ip::udp::endpoint(boost::asio::ip::udp::v4(), local_port),
+        ec
+      );
+
+      if (ec) {
+        if (stream::udp_connectivity_probe_ready(probe)) {
+          return test_loopback_udp_port(probe, relay_port, local_port);
+        }
+
+        BOOST_LOG(debug)
+          << "Unable to bind temporary UDP connectivity listener on port "sv
+          << local_port << ": "sv << ec.message();
+        return port_reachability_e::unavailable;
+      }
+
+      listener.non_blocking(true, ec);
+      if (ec) {
+        return port_reachability_e::unavailable;
+      }
+
+      // Important: send from a separate ephemeral socket. This matches
+      // Moonlight Internet Streaming Tester behavior and prevents the
+      // callback from looking like return traffic for an outbound flow
+      // originating from the Sunshine service port itself.
+      sender.open(boost::asio::ip::udp::v4(), ec);
+      if (ec) {
+        return port_reachability_e::unavailable;
+      }
+
+      std::array<char, 64> receive_buffer {};
+      boost::asio::ip::udp::endpoint sender_endpoint;
+
+      auto callback_received = [&]() {
+        boost::system::error_code receive_ec;
+        const auto bytes = listener.receive_from(
+          boost::asio::buffer(receive_buffer),
+          sender_endpoint,
+          0,
+          receive_ec
+        );
+
+        if (receive_ec == boost::asio::error::would_block ||
+            receive_ec == boost::asio::error::try_again) {
+          return false;
+        }
+
+        if (receive_ec) {
+          return false;
+        }
+
+        return std::string_view {receive_buffer.data(), bytes} == test_payload;
+      };
+
+      for (int i = 0; i < 5; ++i) {
+        sender.send_to(boost::asio::buffer(test_payload), relay_endpoint, 0, ec);
+        if (ec) {
+          return port_reachability_e::unavailable;
+        }
+
+        const auto send_deadline = std::chrono::steady_clock::now() + send_interval;
+        while (std::chrono::steady_clock::now() < send_deadline) {
+          if (callback_received()) {
+            BOOST_LOG(debug)
+              << "Received idle UDP connectivity probe callback on port "sv
+              << local_port;
+            return port_reachability_e::reachable;
+          }
+
+          std::this_thread::sleep_for(poll_interval);
+        }
+      }
+
+      const auto callback_deadline = std::chrono::steady_clock::now() + final_wait;
+      while (std::chrono::steady_clock::now() < callback_deadline) {
+        if (callback_received()) {
+          BOOST_LOG(debug)
+            << "Received idle UDP connectivity probe callback on port "sv
+            << local_port;
+          return port_reachability_e::reachable;
+        }
+
+        std::this_thread::sleep_for(poll_interval);
+      }
+
+      return port_reachability_e::blocked;
+    } catch (const std::exception &e) {
+      stream::cancel_udp_connectivity_probe(probe);
+      BOOST_LOG(debug) << "UDP connectivity probe failed: "sv << e.what();
+      return port_reachability_e::unavailable;
+    }
+  }
+
   static internet_test_result_t test_internet_access() {
     internet_test_result_t result;
 
@@ -226,6 +402,22 @@ namespace upnp {
       false
     );
 
+    result.udp_47998 = test_loopback_udp_port(
+      stream::udp_connectivity_probe_e::video,
+      37998,
+      47998
+    );
+    result.udp_47999 = test_loopback_udp_port(
+      stream::udp_connectivity_probe_e::audio,
+      37999,
+      47999
+    );
+    result.udp_48000 = test_loopback_udp_port(
+      stream::udp_connectivity_probe_e::control,
+      38000,
+      48000
+    );
+
     result.tcp_48010 = test_loopback_rtsp_port(
       "http://loopback-v2.moonlight-stream.org:38010/"
     );
@@ -243,6 +435,9 @@ namespace upnp {
     const std::array tested_ports {
       result.tcp_47984,
       result.tcp_47989,
+      result.udp_47998,
+      result.udp_47999,
+      result.udp_48000,
       result.tcp_48010,
     };
 
@@ -285,6 +480,9 @@ namespace upnp {
       diagnostics.internet_access = internet_access_e::testing;
       set_port_reachability(diagnostics.mappings, "TCP", "47984", port_reachability_e::testing);
       set_port_reachability(diagnostics.mappings, "TCP", "47989", port_reachability_e::testing);
+      set_port_reachability(diagnostics.mappings, "UDP", "47998", port_reachability_e::testing);
+      set_port_reachability(diagnostics.mappings, "UDP", "47999", port_reachability_e::testing);
+      set_port_reachability(diagnostics.mappings, "UDP", "48000", port_reachability_e::testing);
       set_port_reachability(diagnostics.mappings, "TCP", "48010", port_reachability_e::testing);
       diagnostics.last_updated = std::chrono::system_clock::now();
     }

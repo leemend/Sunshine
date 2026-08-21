@@ -22,6 +22,17 @@ namespace stream {
   constexpr auto CONTROL_PORT = 10;
   constexpr auto AUDIO_STREAM_PORT = 11;
 
+  enum class udp_connectivity_probe_e {
+    video,
+    audio,
+    control,
+  };
+
+  void arm_udp_connectivity_probe(udp_connectivity_probe_e probe);
+  bool udp_connectivity_probe_received(udp_connectivity_probe_e probe);
+  bool udp_connectivity_probe_ready(udp_connectivity_probe_e probe);
+  void cancel_udp_connectivity_probe(udp_connectivity_probe_e probe);
+
   struct session_t;
 
   struct session_info_t {

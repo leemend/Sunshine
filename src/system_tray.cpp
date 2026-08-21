@@ -296,9 +296,7 @@ namespace system_tray {
               return "Test Unavailable";
             case upnp::port_reachability_e::not_tested:
             default:
-              return mapping.protocol == "UDP" ?
-                "Requires Active Stream" :
-                "Not Tested";
+              return "Not Tested";
           }
         }();
 
@@ -349,9 +347,7 @@ namespace system_tray {
               return "Test Unavailable";
             case upnp::port_reachability_e::not_tested:
             default:
-              return mapping.protocol == "UDP" ?
-                "Requires Active Stream" :
-                "Not Tested";
+              return "Not Tested";
           }
         }();
 
@@ -391,13 +387,13 @@ namespace system_tray {
 
     new_items.push_back({.text = "-"});
     new_items.push_back({
-      .text = "Refresh Connectivity",
+      .text = "Refresh Connection Status",
       .cb = tray_refresh_connectivity_cb,
     });
 
     if (!new_advanced_labels.empty()) {
       new_items.push_back({
-        .text = "Advanced Details",
+        .text = "TCP/UDP Port Status",
         .submenu = new_advanced_items.data(),
       });
     }
@@ -485,18 +481,13 @@ namespace system_tray {
     {.text = nullptr}
   };
 
-#ifdef _WIN32
-  static struct tray_menu display_device_reset_confirm_submenu[] = {
-    {.text = "This clears Sunshine's saved display configuration", .disabled = 1},
-    {.text = "Confirm Reset", .cb = tray_reset_display_device_config_cb},
-    {.text = nullptr}
-  };
-
-  static struct tray_menu display_device_recovery_submenu[] = {
-    {.text = "Reset Saved Display Config", .submenu = display_device_reset_confirm_submenu},
-    {.text = nullptr}
-  };
-#endif
+  #ifdef _WIN32
+    static struct tray_menu display_device_reset_confirm_submenu[] = {
+      {.text = "This clears Sunshine's saved display configuration", .disabled = 1},
+      {.text = "Confirm Reset", .cb = tray_reset_display_device_config_cb},
+      {.text = nullptr}
+    };
+  #endif
 
   // Tray menu
   static struct tray tray = {
@@ -505,7 +496,7 @@ namespace system_tray {
     .menu =
       (struct tray_menu[]) {
         // todo - use boost/locale to translate menu strings
-        {.text = "Open Sunshine", .cb = tray_open_ui_cb},
+        {.text = "Open Sunshine Web UI", .cb = tray_open_ui_cb},
         {.text = "-"},
         {.text = "Donate",
          .submenu =
@@ -516,14 +507,14 @@ namespace system_tray {
              {.text = nullptr}
            }},
         {.text = "Sunshine Host Settings", .submenu = connection_gate_submenu},
-        {.text = "Host Connectivity"},
+        {.text = "Host Connection Details"},
         {.text = "Client Connections"},
         {.text = "-"},
   // Currently display device settings are only supported on Windows
   #ifdef _WIN32
-        {.text = "Display Device Recovery", .submenu = display_device_recovery_submenu},
+        {.text = "Reset Saved Display Config", .submenu = display_device_reset_confirm_submenu},
   #endif
-        {.text = "Restart", .cb = tray_restart_cb},
+        {.text = "Restart Sunshine", .cb = tray_restart_cb},
         {.text = "Quit", .cb = tray_quit_cb},
         {.text = nullptr}
       },

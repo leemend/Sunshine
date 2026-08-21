@@ -83,6 +83,94 @@ using namespace std::literals;
 
 namespace stream {
 
+  static constexpr std::string_view CONNECTIVITY_PROBE_PAYLOAD = "moonlight-test"sv;
+
+  static std::atomic_bool udp_video_probe_armed = false;
+  static std::atomic_bool udp_video_probe_seen = false;
+  static std::atomic_bool udp_video_probe_ready = false;
+
+  static std::atomic_bool udp_audio_probe_armed = false;
+  static std::atomic_bool udp_audio_probe_seen = false;
+  static std::atomic_bool udp_audio_probe_ready = false;
+
+  static std::atomic_bool udp_control_probe_armed = false;
+  static std::atomic_bool udp_control_probe_seen = false;
+  static std::atomic_bool udp_control_probe_ready = false;
+
+  static std::atomic_bool &probe_armed_flag(udp_connectivity_probe_e probe) {
+    switch (probe) {
+      case udp_connectivity_probe_e::video:
+        return udp_video_probe_armed;
+      case udp_connectivity_probe_e::audio:
+        return udp_audio_probe_armed;
+      case udp_connectivity_probe_e::control:
+      default:
+        return udp_control_probe_armed;
+    }
+  }
+
+  static std::atomic_bool &probe_seen_flag(udp_connectivity_probe_e probe) {
+    switch (probe) {
+      case udp_connectivity_probe_e::video:
+        return udp_video_probe_seen;
+      case udp_connectivity_probe_e::audio:
+        return udp_audio_probe_seen;
+      case udp_connectivity_probe_e::control:
+      default:
+        return udp_control_probe_seen;
+    }
+  }
+
+  static std::atomic_bool &probe_ready_flag(udp_connectivity_probe_e probe) {
+    switch (probe) {
+      case udp_connectivity_probe_e::video:
+        return udp_video_probe_ready;
+      case udp_connectivity_probe_e::audio:
+        return udp_audio_probe_ready;
+      case udp_connectivity_probe_e::control:
+      default:
+        return udp_control_probe_ready;
+    }
+  }
+
+  void arm_udp_connectivity_probe(udp_connectivity_probe_e probe) {
+    probe_seen_flag(probe) = false;
+    probe_armed_flag(probe) = true;
+  }
+
+  bool udp_connectivity_probe_received(udp_connectivity_probe_e probe) {
+    return probe_seen_flag(probe).load();
+  }
+
+  bool udp_connectivity_probe_ready(udp_connectivity_probe_e probe) {
+    return probe_ready_flag(probe).load();
+  }
+
+  void cancel_udp_connectivity_probe(udp_connectivity_probe_e probe) {
+    probe_armed_flag(probe) = false;
+  }
+
+  static int control_connectivity_probe_intercept(ENetHost *host, ENetEvent *) {
+    if (!udp_control_probe_armed.load()) {
+      return 0;
+    }
+
+    const std::string_view packet {
+      reinterpret_cast<const char *>(host->receivedData),
+      host->receivedDataLength
+    };
+
+    if (packet != CONNECTIVITY_PROBE_PAYLOAD) {
+      return 0;
+    }
+
+    udp_control_probe_seen = true;
+    udp_control_probe_armed = false;
+    BOOST_LOG(debug) << "Received UDP 48000 connectivity probe callback"sv;
+
+    return 1;
+  }
+
   enum class socket_e : int {
     video,  ///< Video
     audio  ///< Audio
@@ -271,6 +359,13 @@ namespace stream {
   public:
     int bind(net::af_e address_family, std::uint16_t port) {
       _host = net::host_create(address_family, _addr, port);
+
+      if (_host) {
+        _host->intercept = control_connectivity_probe_intercept;
+        udp_control_probe_ready = true;
+      } else {
+        udp_control_probe_ready = false;
+      }
 
       return !(bool) _host;
     }
@@ -1247,6 +1342,19 @@ namespace stream {
           return;
         }
 
+        const std::string_view received {buf[buf_elem].data(), bytes};
+        auto &probe_armed = buf_elem ? udp_audio_probe_armed : udp_video_probe_armed;
+        auto &probe_seen = buf_elem ? udp_audio_probe_seen : udp_video_probe_seen;
+
+        if (received == CONNECTIVITY_PROBE_PAYLOAD && probe_armed.exchange(false)) {
+          probe_seen = true;
+          BOOST_LOG(debug)
+            << (buf_elem ?
+                  "Received UDP 47999 connectivity probe callback"sv :
+                  "Received UDP 47998 connectivity probe callback"sv);
+          return;
+        }
+
         if (bytes == 4) {
           // For legacy PING packets, find the matching session by address.
           auto it = peer_to_session.find(peer.address());
@@ -1748,6 +1856,7 @@ namespace stream {
 
       return -1;
     }
+    udp_video_probe_ready = true;
 
     ctx.audio_sock.open(protocol, ec);
     if (ec) {
@@ -1762,6 +1871,7 @@ namespace stream {
 
       return -1;
     }
+    udp_audio_probe_ready = true;
 
     ctx.message_queue_queue = std::make_shared<message_queue_queue_t::element_type>(30);
 
