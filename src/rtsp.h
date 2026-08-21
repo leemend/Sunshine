@@ -73,6 +73,23 @@ namespace rtsp_stream {
    * @param session_id Launch session ID of the session to terminate.
    * @return True if a matching session was found and stopped.
    */
+  /**
+   * @brief Arms the existing RTSP listener to recognize one connectivity-test callback.
+   *
+   * A real pending Moonlight launch session always takes priority over this probe.
+   */
+  void arm_connectivity_probe();
+
+  /**
+   * @brief Returns true after the armed connectivity callback reaches TCP 48010.
+   */
+  bool connectivity_probe_received();
+
+  /**
+   * @brief Cancels an armed TCP 48010 connectivity probe.
+   */
+  void cancel_connectivity_probe();
+
   bool terminate_session(std::uint32_t session_id);
 
   /**

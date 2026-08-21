@@ -49,6 +49,8 @@ using asio::ip::udp;
 using namespace std::literals;
 
 namespace rtsp_stream {
+  static std::atomic_bool connectivity_probe_armed = false;
+  static std::atomic_bool connectivity_probe_seen = false;
   void free_msg(PRTSP_MESSAGE msg) {
     freeMessage(msg);
 
@@ -477,6 +479,14 @@ namespace rtsp_stream {
         // Associate the current RTSP session with this socket and start reading
         socket->session = launch_session;
         socket->read();
+      } else if (connectivity_probe_armed.exchange(false)) {
+        // The Moonlight loopback relay has connected back to Sunshine's real
+        // RTSP listener. No RTSP payload is required for this connectivity test.
+        connectivity_probe_seen = true;
+        BOOST_LOG(debug) << "Received TCP 48010 connectivity probe callback"sv;
+
+        boost::system::error_code close_ec;
+        socket->sock.close(close_ec);
       } else {
         // This can happen due to normal things like port scanning, so let's not make these visible by default
         BOOST_LOG(debug) << "No pending session for incoming RTSP connection"sv;
@@ -699,6 +709,19 @@ namespace rtsp_stream {
 
   std::vector<stream::session_info_t> active_sessions() {
     return server.active_sessions();
+  }
+
+  void arm_connectivity_probe() {
+    connectivity_probe_seen = false;
+    connectivity_probe_armed = true;
+  }
+
+  bool connectivity_probe_received() {
+    return connectivity_probe_seen.load();
+  }
+
+  void cancel_connectivity_probe() {
+    connectivity_probe_armed = false;
   }
 
   bool terminate_session(std::uint32_t session_id) {

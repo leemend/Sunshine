@@ -70,6 +70,8 @@ namespace system_tray {
   static std::vector<tray_menu> connectivity_menu_items;
   static std::vector<std::string> connectivity_advanced_labels;
   static std::vector<tray_menu> connectivity_advanced_items;
+  static std::atomic_bool manual_connectivity_test_pending = false;
+  static std::atomic_bool connectivity_notification_armed = false;
 
   struct disconnect_and_unpair_context_t {
     std::uint32_t session_id;
@@ -189,6 +191,8 @@ namespace system_tray {
     disconnect_and_unpair_contexts.swap(new_disconnect_and_unpair_contexts);
   }
 
+  void tray_refresh_connectivity_cb(struct tray_menu *item);
+
   void rebuild_connectivity_diagnostics_menu() {
     const auto diagnostics = upnp::get_diagnostics();
 
@@ -198,22 +202,38 @@ namespace system_tray {
         diagnostics.mappings.begin(),
         diagnostics.mappings.end(),
         [](const upnp::mapping_status_t &mapping) {
-          return mapping.mapped;
+          return mapping.mapping_known && mapping.mapped;
         }
       );
 
     std::vector<std::string> new_labels;
     std::vector<std::string> new_advanced_labels;
 
+    const auto internet_access_label = [&diagnostics]() -> std::string {
+      switch (diagnostics.internet_access) {
+        case upnp::internet_access_e::testing:
+          return "Internet Access: Testing...";
+        case upnp::internet_access_e::working:
+          return "Internet Access: Working";
+        case upnp::internet_access_e::blocked:
+          return "Internet Access: Blocked";
+        case upnp::internet_access_e::unavailable:
+          return "Internet Access: Test Unavailable";
+        case upnp::internet_access_e::not_tested:
+        default:
+          return "Internet Access: Not Tested";
+      }
+    }();
+
     if (!diagnostics.enabled) {
       new_labels.emplace_back("Automatic Port Setup: Off");
       new_labels.emplace_back("Router Setup: Manual Setup Required");
-      new_labels.emplace_back("Internet Access: Not Tested");
+      new_labels.emplace_back(internet_access_label);
     } else if (!diagnostics.igd_found) {
       new_labels.emplace_back("Automatic Port Setup: On");
       new_labels.emplace_back("Router: Not Found");
       new_labels.emplace_back("Router Setup: Needs Attention");
-      new_labels.emplace_back("Internet Access: Not Tested");
+      new_labels.emplace_back(internet_access_label);
     } else {
       new_labels.emplace_back("Automatic Port Setup: On");
       new_labels.emplace_back(
@@ -221,7 +241,11 @@ namespace system_tray {
       );
 
       if (!diagnostics.lan_address.empty()) {
-        new_labels.emplace_back(std::format("This PC: {}", diagnostics.lan_address));
+        new_labels.emplace_back(std::format("Local IP: {}", diagnostics.lan_address));
+      }
+
+      if (!diagnostics.external_address.empty()) {
+        new_labels.emplace_back(std::format("Public IP: {}", diagnostics.external_address));
       }
 
       new_labels.emplace_back(
@@ -230,7 +254,7 @@ namespace system_tray {
           "Router Setup: Needs Attention"
       );
 
-      new_labels.emplace_back("Internet Access: Not Tested");
+      new_labels.emplace_back(internet_access_label);
 
       new_advanced_labels.reserve(diagnostics.mappings.size());
 
@@ -240,21 +264,104 @@ namespace system_tray {
         sorted_mappings.begin(),
         sorted_mappings.end(),
         [](const upnp::mapping_status_t &a, const upnp::mapping_status_t &b) {
-          if (a.protocol != b.protocol) {
-            return a.protocol < b.protocol;
+          const auto a_port = std::stoi(a.wan_port);
+          const auto b_port = std::stoi(b.wan_port);
+
+          if (a_port != b_port) {
+            return a_port < b_port;
           }
 
-          return std::stoi(a.wan_port) < std::stoi(b.wan_port);
+          return a.protocol < b.protocol;
         }
       );
 
       for (const auto &mapping : sorted_mappings) {
+        const auto router_status = [&mapping]() -> std::string_view {
+          if (!mapping.mapping_known) {
+            return "Manual/Unknown";
+          }
+
+          return mapping.mapped ? "UPnP Mapped" : "UPnP Failed";
+        }();
+
+        const auto internet_status = [&mapping]() -> std::string_view {
+          switch (mapping.internet_reachability) {
+            case upnp::port_reachability_e::testing:
+              return "Testing...";
+            case upnp::port_reachability_e::reachable:
+              return "Reachable";
+            case upnp::port_reachability_e::blocked:
+              return "Blocked";
+            case upnp::port_reachability_e::unavailable:
+              return "Test Unavailable";
+            case upnp::port_reachability_e::not_tested:
+            default:
+              return mapping.protocol == "UDP" ?
+                "Requires Active Stream" :
+                "Not Tested";
+          }
+        }();
+
         new_advanced_labels.emplace_back(
           std::format(
-            "{} {}: {}",
+            "{} {} | Router: {} | Internet: {}",
             mapping.protocol,
             mapping.wan_port,
-            mapping.mapped ? "Mapped" : "Not Mapped"
+            router_status,
+            internet_status
+          )
+        );
+      }
+    }
+
+    if (new_advanced_labels.empty() && !diagnostics.mappings.empty()) {
+      auto sorted_mappings = diagnostics.mappings;
+
+      std::sort(
+        sorted_mappings.begin(),
+        sorted_mappings.end(),
+        [](const upnp::mapping_status_t &a, const upnp::mapping_status_t &b) {
+          const auto a_port = std::stoi(a.wan_port);
+          const auto b_port = std::stoi(b.wan_port);
+
+          if (a_port != b_port) {
+            return a_port < b_port;
+          }
+
+          return a.protocol < b.protocol;
+        }
+      );
+
+      for (const auto &mapping : sorted_mappings) {
+        const auto router_status = mapping.mapping_known ?
+          (mapping.mapped ? "UPnP Mapped"sv : "UPnP Failed"sv) :
+          "Manual/Unknown"sv;
+
+        const auto internet_status = [&mapping]() -> std::string_view {
+          switch (mapping.internet_reachability) {
+            case upnp::port_reachability_e::testing:
+              return "Testing...";
+            case upnp::port_reachability_e::reachable:
+              return "Reachable";
+            case upnp::port_reachability_e::blocked:
+              return "Blocked";
+            case upnp::port_reachability_e::unavailable:
+              return "Test Unavailable";
+            case upnp::port_reachability_e::not_tested:
+            default:
+              return mapping.protocol == "UDP" ?
+                "Requires Active Stream" :
+                "Not Tested";
+          }
+        }();
+
+        new_advanced_labels.emplace_back(
+          std::format(
+            "{} {} | Router: {} | Internet: {}",
+            mapping.protocol,
+            mapping.wan_port,
+            router_status,
+            internet_status
           )
         );
       }
@@ -282,8 +389,13 @@ namespace system_tray {
       });
     }
 
+    new_items.push_back({.text = "-"});
+    new_items.push_back({
+      .text = "Refresh Connectivity",
+      .cb = tray_refresh_connectivity_cb,
+    });
+
     if (!new_advanced_labels.empty()) {
-      new_items.push_back({.text = "-"});
       new_items.push_back({
         .text = "Advanced Details",
         .submenu = new_advanced_items.data(),
@@ -373,6 +485,19 @@ namespace system_tray {
     {.text = nullptr}
   };
 
+#ifdef _WIN32
+  static struct tray_menu display_device_reset_confirm_submenu[] = {
+    {.text = "This clears Sunshine's saved display configuration", .disabled = 1},
+    {.text = "Confirm Reset", .cb = tray_reset_display_device_config_cb},
+    {.text = nullptr}
+  };
+
+  static struct tray_menu display_device_recovery_submenu[] = {
+    {.text = "Reset Saved Display Config", .submenu = display_device_reset_confirm_submenu},
+    {.text = nullptr}
+  };
+#endif
+
   // Tray menu
   static struct tray tray = {
     .icon = TRAY_ICON,
@@ -390,13 +515,13 @@ namespace system_tray {
              {.text = "PayPal", .cb = tray_donate_paypal_cb},
              {.text = nullptr}
            }},
-        {.text = "Connections", .submenu = connection_gate_submenu},
-        {.text = "Current Connections"},
-        {.text = "Connectivity"},
+        {.text = "Sunshine Host Settings", .submenu = connection_gate_submenu},
+        {.text = "Host Connectivity"},
+        {.text = "Client Connections"},
         {.text = "-"},
   // Currently display device settings are only supported on Windows
   #ifdef _WIN32
-        {.text = "Reset Display Device Config", .cb = tray_reset_display_device_config_cb},
+        {.text = "Display Device Recovery", .submenu = display_device_recovery_submenu},
   #endif
         {.text = "Restart", .cb = tray_restart_cb},
         {.text = "Quit", .cb = tray_quit_cb},
@@ -405,6 +530,34 @@ namespace system_tray {
     .iconPathCount = 4,
     .allIconPaths = {TRAY_ICON, TRAY_ICON_LOCKED, TRAY_ICON_PLAYING, TRAY_ICON_PAUSING},
   };
+
+  void tray_refresh_connectivity_cb([[maybe_unused]] struct tray_menu *item) {
+    BOOST_LOG(info) << "Refreshing Internet connectivity diagnostics from system tray"sv;
+
+    manual_connectivity_test_pending = true;
+
+    // This synchronously publishes the Testing state to the tray, then launches
+    // the actual WAN test on a worker thread.
+    upnp::refresh_internet_access();
+
+    if (tray_initialized) {
+      tray.notification_title = nullptr;
+      tray.notification_text = nullptr;
+      tray.notification_cb = nullptr;
+      tray.notification_icon = nullptr;
+      tray_update(&tray);
+
+      tray.notification_title = "Connectivity Test Started";
+      tray.notification_text = "Checking Internet access...";
+      tray.notification_cb = nullptr;
+      tray.notification_icon = TRAY_ICON;
+      tray_update(&tray);
+
+      // Leave the fields alive until the next connectivity update. Clearing them
+      // immediately can prevent the native Windows notification from appearing.
+      connectivity_notification_armed = true;
+    }
+  }
 
   void refresh_current_connections() {
     // Keep the previous menu storage alive until tray_update() has replaced
@@ -415,7 +568,7 @@ namespace system_tray {
     auto old_disconnect_and_unpair_contexts = std::move(disconnect_and_unpair_contexts);
     
     rebuild_current_connections_menu();
-    tray.menu[4].submenu = connection_menu_items.data();
+    tray.menu[5].submenu = connection_menu_items.data();
 
     if (tray_initialized) {
       tray_update(&tray);
@@ -423,6 +576,12 @@ namespace system_tray {
   }
 
   void refresh_connectivity_diagnostics() {
+    const auto diagnostics = upnp::get_diagnostics();
+
+    const bool manual_test_completed =
+      diagnostics.internet_access != upnp::internet_access_e::testing &&
+      manual_connectivity_test_pending.exchange(false);
+
     // Keep the previous menu storage alive until tray_update() has replaced
     // the native menu, since it may still reference these strings/items.
     auto old_labels = std::move(connectivity_menu_labels);
@@ -432,10 +591,49 @@ namespace system_tray {
 
     rebuild_connectivity_diagnostics_menu();
 
-    tray.menu[5].submenu = connectivity_menu_items.data();
+    tray.menu[4].submenu = connectivity_menu_items.data();
 
     if (tray_initialized) {
+      // If a prior connectivity notification is still armed, clear it before
+      // this tray update so automatic refreshes cannot replay stale popups.
+      if (connectivity_notification_armed.exchange(false)) {
+        tray.notification_title = nullptr;
+        tray.notification_text = nullptr;
+        tray.notification_cb = nullptr;
+        tray.notification_icon = nullptr;
+      }
+
       tray_update(&tray);
+
+      if (manual_test_completed) {
+        static std::string notification_text;
+
+        switch (diagnostics.internet_access) {
+          case upnp::internet_access_e::working:
+            notification_text = "Internet access is working.";
+            break;
+          case upnp::internet_access_e::blocked:
+            notification_text = "Internet access appears to be blocked.";
+            break;
+          case upnp::internet_access_e::unavailable:
+            notification_text = "The Internet connectivity test is unavailable.";
+            break;
+          case upnp::internet_access_e::not_tested:
+          default:
+            notification_text = "Internet access could not be tested.";
+            break;
+        }
+
+        tray.notification_title = "Connectivity Test Complete";
+        tray.notification_text = notification_text.c_str();
+        tray.notification_cb = nullptr;
+        tray.notification_icon = TRAY_ICON;
+        tray_update(&tray);
+
+        // Keep this notification valid until the next tray refresh, where it
+        // will be cleared before tray_update(). That prevents periodic replay.
+        connectivity_notification_armed = true;
+      }
     }
   }
 
