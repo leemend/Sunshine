@@ -70,7 +70,7 @@ const config = ref(props.config)
                   id="force_host_audio"
                   locale-prefix="config"
                   v-model="config.force_host_audio"
-                  default="false"
+                  default="true"
         ></Checkbox>
       </template>
     </PlatformLayout>
