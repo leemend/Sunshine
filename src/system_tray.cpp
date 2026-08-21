@@ -29,6 +29,7 @@
   #endif
 
   // standard includes
+  #include <algorithm>
   #include <atomic>
   #include <chrono>
   #include <csignal>
@@ -54,6 +55,7 @@
   #include "rtsp.h"
   #include "src/entry_handler.h"
   #include "stream.h"
+  #include "upnp.h"
 
 using namespace std::literals;
 
@@ -64,6 +66,10 @@ namespace system_tray {
   static std::vector<std::string> connection_menu_labels;
   static std::vector<tray_menu> connection_menu_items;
   static std::vector<tray_menu> disconnect_menu_items;
+  static std::vector<std::string> connectivity_menu_labels;
+  static std::vector<tray_menu> connectivity_menu_items;
+  static std::vector<std::string> connectivity_advanced_labels;
+  static std::vector<tray_menu> connectivity_advanced_items;
 
   struct disconnect_and_unpair_context_t {
     std::uint32_t session_id;
@@ -183,6 +189,115 @@ namespace system_tray {
     disconnect_and_unpair_contexts.swap(new_disconnect_and_unpair_contexts);
   }
 
+  void rebuild_connectivity_diagnostics_menu() {
+    const auto diagnostics = upnp::get_diagnostics();
+
+    const bool all_mappings_ok =
+      !diagnostics.mappings.empty() &&
+      std::all_of(
+        diagnostics.mappings.begin(),
+        diagnostics.mappings.end(),
+        [](const upnp::mapping_status_t &mapping) {
+          return mapping.mapped;
+        }
+      );
+
+    std::vector<std::string> new_labels;
+    std::vector<std::string> new_advanced_labels;
+
+    if (!diagnostics.enabled) {
+      new_labels.emplace_back("Automatic Port Setup: Off");
+      new_labels.emplace_back("Router Setup: Manual Setup Required");
+      new_labels.emplace_back("Internet Access: Not Tested");
+    } else if (!diagnostics.igd_found) {
+      new_labels.emplace_back("Automatic Port Setup: On");
+      new_labels.emplace_back("Router: Not Found");
+      new_labels.emplace_back("Router Setup: Needs Attention");
+      new_labels.emplace_back("Internet Access: Not Tested");
+    } else {
+      new_labels.emplace_back("Automatic Port Setup: On");
+      new_labels.emplace_back(
+        diagnostics.igd_connected ? "Router: Connected" : "Router: Not Connected"
+      );
+
+      if (!diagnostics.lan_address.empty()) {
+        new_labels.emplace_back(std::format("This PC: {}", diagnostics.lan_address));
+      }
+
+      new_labels.emplace_back(
+        diagnostics.igd_connected && all_mappings_ok ?
+          "Router Setup: Good" :
+          "Router Setup: Needs Attention"
+      );
+
+      new_labels.emplace_back("Internet Access: Not Tested");
+
+      new_advanced_labels.reserve(diagnostics.mappings.size());
+
+      auto sorted_mappings = diagnostics.mappings;
+
+      std::sort(
+        sorted_mappings.begin(),
+        sorted_mappings.end(),
+        [](const upnp::mapping_status_t &a, const upnp::mapping_status_t &b) {
+          if (a.protocol != b.protocol) {
+            return a.protocol < b.protocol;
+          }
+
+          return std::stoi(a.wan_port) < std::stoi(b.wan_port);
+        }
+      );
+
+      for (const auto &mapping : sorted_mappings) {
+        new_advanced_labels.emplace_back(
+          std::format(
+            "{} {}: {}",
+            mapping.protocol,
+            mapping.wan_port,
+            mapping.mapped ? "Mapped" : "Not Mapped"
+          )
+        );
+      }
+    }
+
+    std::vector<tray_menu> new_advanced_items;
+    new_advanced_items.reserve(new_advanced_labels.size() + 1);
+
+    for (const auto &label : new_advanced_labels) {
+      new_advanced_items.push_back({
+        .text = label.c_str(),
+        .disabled = 1,
+      });
+    }
+
+    new_advanced_items.push_back({.text = nullptr});
+
+    std::vector<tray_menu> new_items;
+    new_items.reserve(new_labels.size() + 3);
+
+    for (const auto &label : new_labels) {
+      new_items.push_back({
+        .text = label.c_str(),
+        .disabled = 1,
+      });
+    }
+
+    if (!new_advanced_labels.empty()) {
+      new_items.push_back({.text = "-"});
+      new_items.push_back({
+        .text = "Advanced Details",
+        .submenu = new_advanced_items.data(),
+      });
+    }
+
+    new_items.push_back({.text = nullptr});
+
+    connectivity_menu_labels.swap(new_labels);
+    connectivity_menu_items.swap(new_items);
+    connectivity_advanced_labels.swap(new_advanced_labels);
+    connectivity_advanced_items.swap(new_advanced_items);
+  }
+
   void tray_open_ui_cb([[maybe_unused]] struct tray_menu *item) {
     BOOST_LOG(info) << "Opening UI from system tray"sv;
     launch_ui();
@@ -277,6 +392,7 @@ namespace system_tray {
            }},
         {.text = "Connections", .submenu = connection_gate_submenu},
         {.text = "Current Connections"},
+        {.text = "Connectivity"},
         {.text = "-"},
   // Currently display device settings are only supported on Windows
   #ifdef _WIN32
@@ -300,6 +416,23 @@ namespace system_tray {
     
     rebuild_current_connections_menu();
     tray.menu[4].submenu = connection_menu_items.data();
+
+    if (tray_initialized) {
+      tray_update(&tray);
+    }
+  }
+
+  void refresh_connectivity_diagnostics() {
+    // Keep the previous menu storage alive until tray_update() has replaced
+    // the native menu, since it may still reference these strings/items.
+    auto old_labels = std::move(connectivity_menu_labels);
+    auto old_items = std::move(connectivity_menu_items);
+    auto old_advanced_labels = std::move(connectivity_advanced_labels);
+    auto old_advanced_items = std::move(connectivity_advanced_items);
+
+    rebuild_connectivity_diagnostics_menu();
+
+    tray.menu[5].submenu = connectivity_menu_items.data();
 
     if (tray_initialized) {
       tray_update(&tray);
@@ -443,6 +576,7 @@ namespace system_tray {
   #endif
 
     refresh_current_connections();
+    refresh_connectivity_diagnostics();
 
     if (tray_init(&tray) < 0) {
       BOOST_LOG(warning) << "Failed to create system tray"sv;

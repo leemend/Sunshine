@@ -4,6 +4,7 @@
  */
 // standard includes
 #include <stddef.h>  // workaround for type_t error in miniupnpc 2.3.3, see https://github.com/miniupnp/miniupnp/commit/e263ab6f56c382e10fed31347ec68095d691a0e8
+#include <mutex>
 
 // lib includes
 #include <miniupnpc/miniupnpc.h>
@@ -21,9 +22,28 @@
 #include "upnp.h"
 #include "utility.h"
 
+#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
+  #include "system_tray.h"
+#endif
+
+
 using namespace std::literals;
 
 namespace upnp {
+
+  static std::mutex diagnostics_mutex;
+  static diagnostics_t diagnostics;
+
+  diagnostics_t get_diagnostics() {
+    std::lock_guard lock(diagnostics_mutex);
+    return diagnostics;
+  }
+
+  static void refresh_tray_diagnostics() {
+#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
+    system_tray::refresh_connectivity_diagnostics();
+#endif
+  }
 
   struct mapping_t {
     struct {
@@ -311,9 +331,22 @@ namespace upnp {
       // WAN IP address changes, or various other conditions.
       do {
         int err = 0;
-        device_t device {upnpDiscover(2000, nullptr, nullptr, 0, IPv4, 2, &err)};
+        device_t device {upnpDiscover(2000, nullptr, nullptr, 0, IPv4, 2, &err)};   
         if (!device || err) {
           BOOST_LOG(warning) << "Couldn't discover any IPv4 UPNP devices"sv;
+
+          {
+            std::lock_guard lock(diagnostics_mutex);
+            diagnostics.igd_found = false;
+            diagnostics.igd_connected = false;
+            diagnostics.lan_address.clear();
+            diagnostics.igd_url.clear();
+            diagnostics.mappings.clear();
+            diagnostics.last_updated = std::chrono::system_clock::now();
+          }
+
+          refresh_tray_diagnostics();
+
           mapped = false;
           continue;
         }
@@ -328,17 +361,53 @@ namespace upnp {
         auto status = upnp::UPNP_GetValidIGDStatus(device, &urls, &data, lan_addr);
         if (status != 1 && status != 2) {
           BOOST_LOG(error) << status_string(status);
+
+          {
+            std::lock_guard lock(diagnostics_mutex);
+            diagnostics.igd_found = status != 0;
+            diagnostics.igd_connected = false;
+            diagnostics.lan_address.clear();
+            diagnostics.igd_url.clear();
+            diagnostics.mappings.clear();
+            diagnostics.last_updated = std::chrono::system_clock::now();
+          }
+
+          refresh_tray_diagnostics();
+
           mapped = false;
           continue;
         }
 
         std::string lan_addr_str {lan_addr.data()};
+        std::vector<mapping_status_t> mapping_results;
+        mapping_results.reserve(mappings.size());
 
         BOOST_LOG(debug) << "Found valid IGD device: "sv << urls->rootdescURL;
 
         for (auto it = std::begin(mappings); it != std::end(mappings) && !shutdown_event->peek(); ++it) {
-          map_upnp_port(data, urls, lan_addr_str, *it);
+          const bool mapping_succeeded = map_upnp_port(data, urls, lan_addr_str, *it);
+
+          mapping_results.push_back({
+            .protocol = it->port.proto,
+            .lan_port = it->port.lan,
+            .wan_port = it->port.wan,
+            .description = it->description,
+            .mapped = mapping_succeeded,
+          });
         }
+
+        {
+          std::lock_guard lock(diagnostics_mutex);
+
+          diagnostics.igd_found = true;
+          diagnostics.igd_connected = status == 1;
+          diagnostics.lan_address = lan_addr_str;
+          diagnostics.igd_url = urls->rootdescURL ? urls->rootdescURL : "";
+          diagnostics.mappings = std::move(mapping_results);
+          diagnostics.last_updated = std::chrono::system_clock::now();
+        }
+
+        refresh_tray_diagnostics();
 
         if (!mapped) {
           BOOST_LOG(info) << "Completed UPnP port mappings to "sv << lan_addr_str << " via "sv << urls->rootdescURL;
@@ -368,6 +437,15 @@ namespace upnp {
   };
 
   std::unique_ptr<platf::deinit_t> start() {
+    {
+      std::lock_guard lock(diagnostics_mutex);
+      diagnostics = {};
+      diagnostics.enabled = config::sunshine.flags[config::flag::UPNP];
+      diagnostics.last_updated = std::chrono::system_clock::now();
+    }
+
+    refresh_tray_diagnostics();
+
     if (!config::sunshine.flags[config::flag::UPNP]) {
       return nullptr;
     }

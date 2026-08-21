@@ -56,6 +56,11 @@ namespace system_tray {
   void refresh_current_connections();
 
   /**
+   * @brief Refreshes the connectivity diagnostics tray submenu.
+   */
+  void refresh_connectivity_diagnostics();
+
+  /**
    * @brief Initializes the system tray without starting a loop.
    * @return 0 if initialization was successful, non-zero otherwise.
    */

@@ -4,6 +4,11 @@
  */
 #pragma once
 
+// standard includes
+#include <chrono>
+#include <string>
+#include <vector>
+
 // lib includes
 #include <miniupnpc/miniupnpc.h>
 
@@ -39,6 +44,29 @@ namespace upnp {
    * @retval 3 An UPnP device has been found but was not recognized as an IGD.
    */
   int UPNP_GetValidIGDStatus(device_t &device, urls_t *urls, IGDdatas *data, std::array<char, INET6_ADDRESS_STRLEN> &lan_addr);
+
+  struct mapping_status_t {
+    std::string protocol;
+    std::string lan_port;
+    std::string wan_port;
+    std::string description;
+    bool mapped;
+  };
+
+  struct diagnostics_t {
+    bool enabled;
+    bool igd_found;
+    bool igd_connected;
+    std::string lan_address;
+    std::string igd_url;
+    std::vector<mapping_status_t> mappings;
+    std::chrono::system_clock::time_point last_updated;
+  };
+
+  /**
+  * @brief Gets the latest UPnP diagnostics snapshot.
+  */
+  diagnostics_t get_diagnostics();
 
   [[nodiscard]] std::unique_ptr<platf::deinit_t> start();
 }  // namespace upnp
