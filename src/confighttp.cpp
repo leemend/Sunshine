@@ -43,6 +43,7 @@
 #include "platform/common.h"
 #include "process.h"
 #include "rtsp.h"
+#include "stream.h"
 #include "utility.h"
 #include "uuid.h"
 
@@ -1532,6 +1533,289 @@ namespace confighttp {
     send_response(response, output_tree);
   }
 
+
+  /**
+   * @brief Authorize a local TeknoParrot-managed API request.
+   * @return True when Sunshine is in managed mode and the caller is this PC.
+   */
+  bool authorizeManagedRequest(const resp_https_t &response, const req_https_t &request) {
+    const auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
+
+    if (!config::sunshine.managed_mode) {
+      BOOST_LOG(info) << "Managed API: ["sv << address << "] -- denied because managed mode is disabled"sv;
+      not_found(response, request, "Managed API is unavailable");
+      return false;
+    }
+
+    if (net::from_address(address) != net::net_e::PC) {
+      BOOST_LOG(warning) << "Managed API: ["sv << address << "] -- denied because request is not local"sv;
+      response->write(SimpleWeb::StatusCode::client_error_forbidden);
+      return false;
+    }
+
+    return true;
+  }
+
+  /**
+   * @brief Get runtime status for the local TeknoParrot management UI.
+   *
+   * @api_examples{/api/managed/status| GET| null}
+   */
+  void getManagedStatus(const resp_https_t &response, const req_https_t &request) {
+    if (!authorizeManagedRequest(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    nlohmann::json output_tree;
+    output_tree["status"] = true;
+    output_tree["running"] = true;
+    output_tree["managed"] = true;
+    output_tree["version"] = PROJECT_VERSION;
+    output_tree["platform"] = SUNSHINE_PLATFORM;
+    output_tree["connection_mode"] = connection_gate::mode_to_string(connection_gate::current_mode());
+    output_tree["connection_open"] = connection_gate::is_open();
+    output_tree["auto_close_seconds"] = config::sunshine.connection_gate_auto_close_seconds;
+
+    auto countdown = connection_gate::seconds_until_auto_close();
+    output_tree["closing_in_seconds"] = countdown ? nlohmann::json(*countdown) : nlohmann::json(nullptr);
+
+    output_tree["active_sessions"] = rtsp_stream::session_count();
+    output_tree["paired_clients"] = nvhttp::get_all_clients().size();
+    output_tree["pairing_pending"] = nvhttp::pairing_pending();
+
+    send_response(response, output_tree);
+  }
+
+  /**
+   * @brief Get paired clients for the local TeknoParrot management UI.
+   *
+   * @api_examples{/api/managed/clients| GET| null}
+   */
+  void getManagedClients(const resp_https_t &response, const req_https_t &request) {
+    if (!authorizeManagedRequest(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    auto clients = nvhttp::get_all_clients();
+    const auto active_sessions = rtsp_stream::active_sessions();
+
+    for (auto &client : clients) {
+      const std::string uuid = client.value("uuid", "");
+
+      client["connected"] = std::ranges::any_of(active_sessions, [&uuid](const auto &session) {
+        return !uuid.empty() &&
+               !session.client_uuid.empty() &&
+               session.client_uuid == uuid;
+      });
+    }
+
+    nlohmann::json output_tree;
+    output_tree["status"] = true;
+    output_tree["clients"] = std::move(clients);
+    output_tree["active_sessions"] = active_sessions.size();
+
+    send_response(response, output_tree);
+  }
+
+  /**
+   * @brief Pair a Moonlight client from the local TeknoParrot management UI.
+   *
+   * Body:
+   * {
+   *   "pin": "1234",
+   *   "name": "Friendly Client Name"
+   * }
+   *
+   * @api_examples{/api/managed/pair| POST| {"pin":"1234","name":"My PC"}}
+   */
+  void managedPair(const resp_https_t &response, const req_https_t &request) {
+    if (!check_content_type(response, request, "application/json")) {
+      return;
+    }
+
+    if (!authorizeManagedRequest(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    std::stringstream ss;
+    ss << request->content.rdbuf();
+
+    try {
+      const nlohmann::json input_tree = nlohmann::json::parse(ss);
+      const std::string pin = input_tree.value("pin", "");
+      const std::string name = input_tree.value("name", "");
+
+      if (pin.size() != 4 || !std::ranges::all_of(pin, [](const char ch) {
+            return ch >= '0' && ch <= '9';
+          })) {
+        bad_request(response, request, "PIN must contain exactly 4 digits");
+        return;
+      }
+
+      nlohmann::json output_tree;
+      output_tree["status"] = nvhttp::pin(pin, name);
+      send_response(response, output_tree);
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "ManagedPair: "sv << e.what();
+      bad_request(response, request, e.what());
+    }
+  }
+
+  /**
+   * @brief Set the live connection gate from the local TeknoParrot management UI.
+   *
+   * Both fields are optional:
+   * {
+   *   "mode": "open|closed|auto_close",
+   *   "auto_close_seconds": 210
+   * }
+   *
+   * @api_examples{/api/managed/connection-mode| POST| {"mode":"open"}}
+   */
+  void setManagedConnectionMode(const resp_https_t &response, const req_https_t &request) {
+    if (!check_content_type(response, request, "application/json")) {
+      return;
+    }
+
+    if (!authorizeManagedRequest(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    std::stringstream ss;
+    ss << request->content.rdbuf();
+
+    try {
+      const nlohmann::json input_tree = nlohmann::json::parse(ss);
+
+      if (input_tree.contains("mode")) {
+        const std::string mode_str = input_tree.value("mode", "");
+        static const std::vector<std::string> valid_modes {"open", "closed", "auto_close"};
+
+        if (std::find(valid_modes.begin(), valid_modes.end(), mode_str) == valid_modes.end()) {
+          bad_request(response, request, "Invalid mode - must be one of open, closed, auto_close");
+          return;
+        }
+
+        connection_gate::set_mode(connection_gate::mode_from_string(mode_str));
+      }
+
+      if (input_tree.contains("auto_close_seconds")) {
+        const int seconds = input_tree.value("auto_close_seconds", -1);
+
+        if (seconds < 0 || seconds > 86400) {
+          bad_request(response, request, "auto_close_seconds must be between 0 and 86400");
+          return;
+        }
+
+        config::sunshine.connection_gate_auto_close_seconds = seconds;
+        BOOST_LOG(info) << "Managed API: connection gate auto-close delay changed to "sv << seconds << " second(s)"sv;
+      }
+
+      nlohmann::json output_tree;
+      output_tree["status"] = true;
+      output_tree["mode"] = connection_gate::mode_to_string(connection_gate::current_mode());
+      output_tree["is_open"] = connection_gate::is_open();
+      output_tree["auto_close_seconds"] = config::sunshine.connection_gate_auto_close_seconds;
+
+      auto countdown = connection_gate::seconds_until_auto_close();
+      output_tree["closing_in_seconds"] = countdown ? nlohmann::json(*countdown) : nlohmann::json(nullptr);
+
+      send_response(response, output_tree);
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "SetManagedConnectionMode: "sv << e.what();
+      bad_request(response, request, e.what());
+    }
+  }
+
+  /**
+   * @brief Unpair a client from the local TeknoParrot management UI.
+   *
+   * Body:
+   * {
+   *   "uuid": "<client uuid>"
+   * }
+   *
+   * @api_examples{/api/managed/unpair| POST| {"uuid":"1234"}}
+   */
+  void managedUnpair(const resp_https_t &response, const req_https_t &request) {
+    if (!check_content_type(response, request, "application/json")) {
+      return;
+    }
+
+    if (!authorizeManagedRequest(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    std::stringstream ss;
+    ss << request->content.rdbuf();
+
+    try {
+      const nlohmann::json input_tree = nlohmann::json::parse(ss);
+      const std::string uuid = input_tree.value("uuid", "");
+
+      if (uuid.empty()) {
+        bad_request(response, request, "uuid is required");
+        return;
+      }
+
+      nlohmann::json output_tree;
+      output_tree["status"] = nvhttp::unpair_client(uuid);
+      send_response(response, output_tree);
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "ManagedUnpair: "sv << e.what();
+      bad_request(response, request, e.what());
+    }
+  }
+
+  /**
+   * @brief Disconnect all active streaming sessions.
+   *
+   * @api_examples{/api/managed/disconnect-all| POST| null}
+   */
+  void managedDisconnectAll(const resp_https_t &response, const req_https_t &request) {
+    if (!authorizeManagedRequest(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    rtsp_stream::terminate_sessions();
+
+    nlohmann::json output_tree;
+    output_tree["status"] = true;
+    send_response(response, output_tree);
+  }
+
+  /**
+   * @brief Gracefully shut down Sunshine from the local TeknoParrot management UI.
+   *
+   * @api_examples{/api/managed/shutdown| POST| null}
+   */
+  void managedShutdown(const resp_https_t &response, const req_https_t &request) {
+    if (!authorizeManagedRequest(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    nlohmann::json output_tree;
+    output_tree["status"] = true;
+    send_response(response, output_tree);
+
+    BOOST_LOG(info) << "Managed API: shutdown requested"sv;
+    mail::man->event<bool>(mail::shutdown)->raise(true);
+  }
+
   /**
    * @brief Get the connection gate's current mode and effective open/closed state.
    * @param response The HTTP response object.
@@ -1877,6 +2161,13 @@ namespace confighttp {
     server.resource["^/api/clients/update$"]["POST"] = updateClient;
     server.resource["^/api/config$"]["GET"] = getConfig;
     server.resource["^/api/config$"]["POST"] = saveConfig;
+    server.resource["^/api/managed/status$"]["GET"] = getManagedStatus;
+    server.resource["^/api/managed/clients$"]["GET"] = getManagedClients;
+    server.resource["^/api/managed/pair$"]["POST"] = managedPair;
+    server.resource["^/api/managed/connection-mode$"]["POST"] = setManagedConnectionMode;
+    server.resource["^/api/managed/unpair$"]["POST"] = managedUnpair;
+    server.resource["^/api/managed/disconnect-all$"]["POST"] = managedDisconnectAll;
+    server.resource["^/api/managed/shutdown$"]["POST"] = managedShutdown;
     server.resource["^/api/connection_gate$"]["GET"] = getConnectionGate;
     server.resource["^/api/connection_gate$"]["POST"] = setConnectionGate;
     server.resource["^/api/configLocale$"]["GET"] = getLocale;

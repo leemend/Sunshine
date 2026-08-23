@@ -7,6 +7,7 @@
 // standard includes
 #include <bitset>
 #include <chrono>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -284,6 +285,8 @@ namespace config {
     std::string log_file;
     bool notify_pre_releases;
     bool system_tray;
+    bool managed_mode;  ///< True when Sunshine is launched under an external management UI.
+    std::uint32_t managed_parent_pid;  ///< PID of the external management UI. 0 disables parent monitoring.
     std::vector<prep_cmd_t> prep_cmds;
 
     // List of allowed origins for CSRF protection (e.g., "https://example.com,https://app.example.com")

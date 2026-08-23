@@ -430,7 +430,74 @@ int main(int argc, char *argv[]) {
 #endif
   }
 
+#ifdef _WIN32
+  std::thread managed_parent_watchdog;
+
+  if (config::sunshine.managed_mode &&
+      config::sunshine.managed_parent_pid != 0) {
+    managed_parent_watchdog = std::thread([shutdown_event]() {
+      const DWORD parent_pid =
+        static_cast<DWORD>(config::sunshine.managed_parent_pid);
+
+      BOOST_LOG(info)
+        << "Managed mode: monitoring parent process PID "
+        << parent_pid;
+
+      HANDLE parent_process = OpenProcess(
+        SYNCHRONIZE,
+        FALSE,
+        parent_pid
+      );
+
+      if (parent_process == nullptr) {
+        BOOST_LOG(warning)
+          << "Managed mode: parent process PID "
+          << parent_pid
+          << " is unavailable; shutting down Sunshine";
+
+        shutdown_event->raise(true);
+        return;
+      }
+
+      while (!shutdown_event->peek()) {
+        const DWORD wait_result =
+          WaitForSingleObject(parent_process, 500);
+
+        if (wait_result == WAIT_OBJECT_0) {
+          BOOST_LOG(info)
+            << "Managed mode: parent process PID "
+            << parent_pid
+            << " exited; shutting down Sunshine";
+
+          CloseHandle(parent_process);
+          shutdown_event->raise(true);
+          return;
+        }
+
+        if (wait_result == WAIT_FAILED) {
+          BOOST_LOG(warning)
+            << "Managed mode: failed while monitoring parent process PID "
+            << parent_pid
+            << "; shutting down Sunshine";
+
+          CloseHandle(parent_process);
+          shutdown_event->raise(true);
+          return;
+        }
+      }
+
+      CloseHandle(parent_process);
+    });
+  }
+#endif
+
   mainThreadLoop(shutdown_event);
+
+#ifdef _WIN32
+  if (managed_parent_watchdog.joinable()) {
+    managed_parent_watchdog.join();
+  }
+#endif
 
   httpThread.join();
   configThread.join();

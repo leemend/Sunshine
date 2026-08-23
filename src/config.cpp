@@ -9,6 +9,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -602,6 +603,8 @@ namespace config {
     platf::appdata().string() + "/sunshine.log",  // log file
     false,  // notify_pre_releases
     true,  // system_tray
+    false,  // managed_mode
+    0,      // managed_parent_pid
     {},  // prep commands
     {},  // csrf_allowed_origins
     "closed"s,  // connection_gate_mode - fail closed by default, matching the whole point of the feature
@@ -1541,6 +1544,28 @@ namespace config {
         service_admin_launch = true;
       }
 #endif
+      else if (line == "--managed"sv) {
+        sunshine.managed_mode = true;
+      }
+      else if (line == "--parent-pid"sv) {
+        if (x + 1 >= argc) {
+          std::cerr << "Error: --parent-pid requires a process ID" << std::endl;
+          return -1;
+        }
+
+        try {
+          const auto pid = std::stoul(argv[++x]);
+
+          if (pid == 0 || pid > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::out_of_range("PID out of range");
+          }
+
+          sunshine.managed_parent_pid = static_cast<std::uint32_t>(pid);
+        } catch (const std::exception &) {
+          std::cerr << "Error: invalid --parent-pid value" << std::endl;
+          return -1;
+        }
+      }
       else if (*line == '-') {
         if (*(line + 1) == '-') {
           sunshine.cmd.name = line + 2;

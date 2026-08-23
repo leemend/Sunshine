@@ -261,6 +261,7 @@ namespace logging {
       << "    Note: The configuration will be created if it doesn't exist."sv << std::endl
       << std::endl
       << "    --help                    | print help"sv << std::endl
+      << "    --managed                 | run under an external management UI"sv << std::endl
       << "    --creds username password | set user credentials for the Web manager"sv << std::endl
       << "    --version                 | print the version of sunshine"sv << std::endl
       << std::endl

@@ -6,6 +6,7 @@
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
 // standard includes
+#include <atomic>
 #include <filesystem>
 #include <format>
 #include <mutex>
@@ -149,6 +150,7 @@ namespace nvhttp {
   std::unordered_map<std::string, pair_session_t> map_id_sess;
   client_t client_root;
   std::atomic<uint32_t> session_id_counter;
+  std::atomic<uint32_t> pending_pairing_requests {0};
 
   using args_t = SimpleWeb::CaseInsensitiveMultimap;
   using resp_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SunshineHTTPS>::Response>;
@@ -375,6 +377,10 @@ namespace nvhttp {
   }
 
   void remove_session(const pair_session_t &sess) {
+    if (sess.pin_pending) {
+      pending_pairing_requests.fetch_sub(1, std::memory_order_relaxed);
+    }
+
     map_id_sess.erase(sess.client.uniqueID);
   }
 
@@ -628,6 +634,11 @@ namespace nvhttp {
           getservercert(ptr->second, tree, pin);
           return;
         } else {
+          if (!ptr->second.pin_pending) {
+            ptr->second.pin_pending = true;
+            pending_pairing_requests.fetch_add(1, std::memory_order_relaxed);
+          }
+
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
           system_tray::update_tray_require_pin();
 #endif
@@ -692,6 +703,12 @@ namespace nvhttp {
     }
 
     auto &sess = std::begin(map_id_sess)->second;
+
+    if (sess.pin_pending) {
+      sess.pin_pending = false;
+      pending_pairing_requests.fetch_sub(1, std::memory_order_relaxed);
+    }
+
     getservercert(sess, tree, pin);
     sess.client.name = name;
 
@@ -809,6 +826,10 @@ namespace nvhttp {
     pt::write_xml(data, tree);
     response->write(data.str());
     response->close_connection_after_response = true;
+  }
+
+  bool pairing_pending() {
+    return pending_pairing_requests.load(std::memory_order_relaxed) > 0;
   }
 
   nlohmann::json get_all_clients() {

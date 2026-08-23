@@ -521,7 +521,7 @@ namespace system_tray {
     // the actual WAN test on a worker thread.
     upnp::refresh_internet_access();
 
-    if (tray_initialized) {
+    if (tray_initialized && !config::sunshine.managed_mode) {
       clear_armed_tray_notification();
 
       tray.notification_title = nullptr;
@@ -584,7 +584,7 @@ namespace system_tray {
 
       tray_update(&tray);
 
-      if (manual_test_completed) {
+      if (manual_test_completed && !config::sunshine.managed_mode) {
         static std::string notification_text;
 
         if (!rtsp_stream::active_sessions().empty()) {
@@ -806,17 +806,20 @@ namespace system_tray {
     tray.notification_text = nullptr;
     tray.notification_cb = nullptr;
     tray.notification_icon = nullptr;
-    tray.icon = TRAY_ICON_PLAYING;
-    tray_update(&tray);
-
-    tray.icon = TRAY_ICON_PLAYING;
-    tray.notification_title = "Stream Started";
 
     static std::string msg;
     msg = std::format("Streaming started for {}", app_name);
 
-    tray.notification_text = msg.c_str();
+    tray.icon = TRAY_ICON_PLAYING;
     tray.tooltip = msg.c_str();
+    tray_update(&tray);
+
+    if (config::sunshine.managed_mode) {
+      return;
+    }
+
+    tray.notification_title = "Stream Started";
+    tray.notification_text = msg.c_str();
     tray.notification_icon = TRAY_ICON_PLAYING;
     tray_update(&tray);
 
@@ -834,16 +837,20 @@ namespace system_tray {
     tray.notification_text = nullptr;
     tray.notification_cb = nullptr;
     tray.notification_icon = nullptr;
-    tray.icon = TRAY_ICON_PAUSING;
-    tray_update(&tray);
 
     static std::string msg;
     msg = std::format("Streaming paused for {}", app_name);
 
     tray.icon = TRAY_ICON_PAUSING;
+    tray.tooltip = msg.c_str();
+    tray_update(&tray);
+
+    if (config::sunshine.managed_mode) {
+      return;
+    }
+
     tray.notification_title = "Stream Paused";
     tray.notification_text = msg.c_str();
-    tray.tooltip = msg.c_str();
     tray.notification_icon = TRAY_ICON_PAUSING;
     tray_update(&tray);
 
@@ -862,16 +869,19 @@ namespace system_tray {
     tray.notification_cb = nullptr;
     tray.notification_icon = nullptr;
     tray.icon = TRAY_ICON;
+    tray.tooltip = PROJECT_NAME;
     tray_update(&tray);
+
+    if (config::sunshine.managed_mode) {
+      return;
+    }
 
     static std::string msg;
     msg = std::format("Application {} successfully stopped", app_name);
 
-    tray.icon = TRAY_ICON;
     tray.notification_icon = TRAY_ICON;
     tray.notification_title = "Application Stopped";
     tray.notification_text = msg.c_str();
-    tray.tooltip = PROJECT_NAME;
     tray_update(&tray);
 
     tray_notification_armed = true;
@@ -1459,6 +1469,10 @@ namespace system_tray {
     tray.notification_icon = nullptr;
     tray.icon = TRAY_ICON;
     tray_update(&tray);
+    if (config::sunshine.managed_mode) {
+      BOOST_LOG(info) << "Pairing request received while running in managed mode"sv;
+      return;
+    }
 
     tray.icon = TRAY_ICON;
     tray.notification_title = "Incoming Pairing Request";

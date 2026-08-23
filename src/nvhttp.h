@@ -102,6 +102,11 @@ namespace nvhttp {
     } async_insert_pin;
 
     /**
+     * @brief True while Moonlight is waiting for the user to submit its PIN.
+     */
+    bool pin_pending = false;
+
+    /**
      * @brief used as a security measure to prevent out of order calls
      */
     PAIR_PHASE last_phase = PAIR_PHASE::NONE;
@@ -174,6 +179,11 @@ namespace nvhttp {
    * @examples_end
    */
   bool pin(std::string pin, std::string name);
+
+  /**
+   * @brief True while one or more Moonlight pairing requests are waiting for a PIN.
+   */
+  bool pairing_pending();
 
   /**
    * @brief Remove single client.
