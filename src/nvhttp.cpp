@@ -167,7 +167,7 @@ namespace nvhttp {
   std::mutex authenticated_clients_mutex;
   std::unordered_map<const https_server_t::Request *, authenticated_client_t> authenticated_clients;
 
-  bool take_authenticated_client(
+  bool get_authenticated_client(
     const req_https_t &request,
     std::string &name,
     std::string &uuid
@@ -179,10 +179,11 @@ namespace nvhttp {
       return false;
     }
 
-    name = std::move(it->second.name);
-    uuid = std::move(it->second.uuid);
-
-    authenticated_clients.erase(it);
+    // A Simple-Web-Server Session can reuse the same Request object for multiple requests on
+    // one authenticated TLS connection. Keep this association until the weak Request expires
+    // so a later /resume on that connection retains the paired-client UUID too.
+    name = it->second.name;
+    uuid = it->second.uuid;
     return true;
   }
 
@@ -918,6 +919,12 @@ namespace nvhttp {
       return;
     }
 
+    std::string authenticated_client_name;
+    std::string authenticated_client_uuid;
+    if (!get_authenticated_client(request, authenticated_client_name, authenticated_client_uuid)) {
+      BOOST_LOG(warning) << "Authenticated launch request has no paired-client identity"sv;
+    }
+
 #ifdef _WIN32
     // Reject a genuinely new client cleanly (a normal "couldn't connect" on their end) rather
     // than letting them stream in with no free TeknoParrot player slot - which would otherwise
@@ -925,15 +932,16 @@ namespace nvhttp {
     // non-TeknoParrot apps/sessions, since the roster this checks only ever gets populated by
     // an actual TeknoParrot session's own input traffic.
     //
-    // Must resolve the identity the exact same way stream.cpp's start() does before calling
-    // assign_player_slot() for real (prefer the client's uniqueid, falling back to its address
-    // for clients that don't send one, or send the known non-unique "0123456789ABCDEF"
-    // placeholder) - otherwise a reconnecting client's sticky slot would never be recognized
-    // here, since this check would be keyed on the wrong identity string.
+    // Resolve the identity the exact same way stream.cpp's start() does before calling
+    // assign_player_slot() for real. Sunshine's paired-client UUID is preferred because it is
+    // unique, authenticated, and stable. Fall back to Moonlight's uniqueid and then address for
+    // older clients that don't provide a usable persistent identity.
     auto uniqueid = get_arg(args, "uniqueid", "unknown");
     auto addr_string = net::addr_to_normalized_string(request->remote_endpoint().address());
     bool has_real_unique_id = uniqueid != "unknown"sv && uniqueid != "0123456789ABCDEF"sv;
-    std::string client_identity = has_real_unique_id ? uniqueid : addr_string;
+    std::string client_identity = !authenticated_client_uuid.empty() ?
+                                    authenticated_client_uuid :
+                                    (has_real_unique_id ? uniqueid : addr_string);
 
     if (!teknoparrot_pipe::has_free_player_slot(client_identity)) {
       BOOST_LOG(info) << "Rejected launch request: no free TeknoParrot player slot"sv;
@@ -958,12 +966,8 @@ namespace nvhttp {
 
     host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     auto launch_session = make_launch_session(host_audio, args);
-
-    take_authenticated_client(
-      request,
-      launch_session->client_name,
-      launch_session->client_uuid
-    );
+    launch_session->client_name = std::move(authenticated_client_name);
+    launch_session->client_uuid = std::move(authenticated_client_uuid);
 
     if (rtsp_stream::session_count() == 0) {
       // The display should be restored in case something fails as there are no other sessions.
@@ -1088,13 +1092,35 @@ namespace nvhttp {
       return;
     }
 
-    const auto launch_session = make_launch_session(host_audio, args);
+    std::string authenticated_client_name;
+    std::string authenticated_client_uuid;
+    if (!get_authenticated_client(request, authenticated_client_name, authenticated_client_uuid)) {
+      BOOST_LOG(warning) << "Authenticated resume request has no paired-client identity"sv;
+    }
 
-    take_authenticated_client(
-      request,
-      launch_session->client_name,
-      launch_session->client_uuid
-    );
+#ifdef _WIN32
+    // /resume is also used when additional clients join an already-running shared app. Apply
+    // the same slot-capacity check as /launch so a fourth client can never fall through and
+    // collide with an existing P2-P4 assignment.
+    auto uniqueid = get_arg(args, "uniqueid", "unknown");
+    auto addr_string = net::addr_to_normalized_string(request->remote_endpoint().address());
+    bool has_real_unique_id = uniqueid != "unknown"sv && uniqueid != "0123456789ABCDEF"sv;
+    std::string client_identity = !authenticated_client_uuid.empty() ?
+                                    authenticated_client_uuid :
+                                    (has_real_unique_id ? uniqueid : addr_string);
+
+    if (!teknoparrot_pipe::has_free_player_slot(client_identity)) {
+      BOOST_LOG(info) << "Rejected resume request: no free TeknoParrot player slot"sv;
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "All player slots are currently full");
+      return;
+    }
+#endif
+
+    const auto launch_session = make_launch_session(host_audio, args);
+    launch_session->client_name = std::move(authenticated_client_name);
+    launch_session->client_uuid = std::move(authenticated_client_uuid);
 
     if (no_active_sessions) {
       // We want to prepare display only if there are no active sessions at

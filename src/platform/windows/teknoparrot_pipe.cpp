@@ -39,7 +39,8 @@ namespace teknoparrot_pipe {
       MSG_MOUSE_BUTTON = 0x04,
       MSG_MOUSE_WHEEL = 0x05,
       MSG_ABS_POSITION = 0x06,
-      MSG_GAMEPAD_SLOT = 0x07
+      MSG_GAMEPAD_SLOT = 0x07,
+      MSG_CLIENT_IDENTITY = 0x08
     };
 
     std::atomic<bool> g_running {false};
@@ -53,10 +54,14 @@ namespace teknoparrot_pipe {
     std::mutex g_roster_mutex;
     std::set<int> g_connected_players;  ///< Players currently known to be connected, so a newly
                                          ///< attached TeknoParrotUI reader can be caught up.
-    std::map<std::string, int> g_client_slots;  ///< Sticky client-address -> player-slot map, so
+    std::map<int, std::size_t> g_player_session_counts;  ///< Live sessions sharing each player.
+    std::map<std::string, int> g_client_slots;  ///< Sticky client-identity -> player-slot map, so
                                                  ///< a client keeps its number across session
                                                  ///< restarts (settings screens, app switches)
                                                  ///< instead of drifting on every reconnect.
+    std::map<int, std::string> g_pending_slot_owners;  ///< Atomic reservations between slot
+                                                        ///< assignment and roster publication.
+    std::map<int, std::string> g_client_uuids;  ///< player -> persistent paired Sunshine client UUID.
     std::map<int, int> g_gamepad_slots;  ///< player -> real Windows XInput user index, guarded by
                                           ///< g_roster_mutex like g_connected_players. Unlike
                                           ///< Roster, a GamepadSlot message is only ever sent
@@ -96,6 +101,7 @@ namespace teknoparrot_pipe {
       return buf;
     }
 
+
     /**
      * @brief Appends an integral value to a byte buffer in little-endian order.
      */
@@ -109,6 +115,23 @@ namespace teknoparrot_pipe {
       }
     }
 
+    std::vector<uint8_t> make_client_identity_message(int player, const std::string &client_uuid) {
+      constexpr size_t MAX_UUID_BYTES = 0xFFFF;
+
+      const size_t uuid_size = (std::min)(client_uuid.size(), MAX_UUID_BYTES);
+
+      std::vector<uint8_t> buf;
+      buf.reserve(4 + uuid_size);
+      buf.push_back(MSG_CLIENT_IDENTITY);
+      buf.push_back(static_cast<uint8_t>(player));
+      append_le<uint16_t>(buf, static_cast<uint16_t>(uuid_size));
+      buf.insert(
+        buf.end(),
+        client_uuid.begin(),
+        client_uuid.begin() + static_cast<std::string::difference_type>(uuid_size)
+      );
+      return buf;
+    }
     /**
      * @brief Queues a fully-serialized message for the writer loop. Drops the event outright
      * (rather than blocking or growing unbounded) if no client is currently connected, since
@@ -178,6 +201,18 @@ namespace teknoparrot_pipe {
             std::lock_guard<std::mutex> queue_lock(g_queue_mutex);
             for (int player : g_connected_players) {
               g_queue.push_back(make_roster_message(player, true));
+            }
+          }
+
+          // Replay the persistent paired-client UUID for each currently-connected streamed
+          // player too. This lets TeknoParrotUI attach after streaming has already begun and
+          // still resolve P2-P4 to the correct saved remote-player profile.
+          if (!g_client_uuids.empty()) {
+            std::lock_guard<std::mutex> queue_lock(g_queue_mutex);
+            for (const auto &entry : g_client_uuids) {
+              if (g_connected_players.count(entry.first) && !entry.second.empty()) {
+                g_queue.push_back(make_client_identity_message(entry.first, entry.second));
+              }
             }
           }
 
@@ -261,22 +296,68 @@ namespace teknoparrot_pipe {
   }
 
   void send_roster(int player, bool connected) {
+    if (player < 2 || player > 4) {
+      return;
+    }
+
+    bool roster_changed = false;
     {
       std::lock_guard<std::mutex> roster_lock(g_roster_mutex);
       if (connected) {
-        g_connected_players.insert(player);
+        g_pending_slot_owners.erase(player);
+        auto &session_count = g_player_session_counts[player];
+        ++session_count;
+        if (session_count == 1) {
+          g_connected_players.insert(player);
+          roster_changed = true;
+        }
       } else {
+        auto count_it = g_player_session_counts.find(player);
+        if (count_it == g_player_session_counts.end()) {
+          return;
+        }
+
+        if (--count_it->second != 0) {
+          return;
+        }
+
+        g_player_session_counts.erase(count_it);
         g_connected_players.erase(player);
+        roster_changed = true;
 
         // The controller (if any) that was allocated for this player's previous session is
         // gone too - don't let a stale index get replayed to the next reader as if it still
         // applied. If the player reconnects and gets a new controller, a fresh GamepadSlot
         // message (and the tracking below) will repopulate this.
         g_gamepad_slots.erase(player);
+        g_client_uuids.erase(player);
       }
     }
 
-    push_message(make_roster_message(player, connected));
+    if (roster_changed) {
+      push_message(make_roster_message(player, connected));
+    }
+  }
+
+  void send_client_identity(int player, const std::string &client_uuid) {
+    if (player < 2 || player > 4 || client_uuid.empty()) {
+      return;
+    }
+
+    {
+      std::lock_guard<std::mutex> roster_lock(g_roster_mutex);
+      g_client_uuids[player] = client_uuid;
+    }
+
+    debug_log(
+      "send_client_identity: player " +
+      std::to_string(player) +
+      " -> paired UUID [" +
+      client_uuid +
+      "]"
+    );
+
+    push_message(make_client_identity_message(player, client_uuid));
   }
 
   void send_mouse_move(int player, int32_t delta_x, int32_t delta_y) {
@@ -345,37 +426,51 @@ namespace teknoparrot_pipe {
     if (!client_address.empty()) {
       auto it = g_client_slots.find(client_address);
       if (it != g_client_slots.end()) {
-        debug_log("assign_player_slot(\"" + client_address + "\"): REUSING existing slot " + std::to_string(it->second));
-        return it->second;
+        const int existing_slot = it->second;
+        const auto pending_it = g_pending_slot_owners.find(existing_slot);
+        if (pending_it == g_pending_slot_owners.end() || pending_it->second == client_address) {
+          if (!g_connected_players.count(existing_slot)) {
+            g_pending_slot_owners[existing_slot] = client_address;
+          }
+          debug_log("assign_player_slot(\"" + client_address + "\"): REUSING existing slot " + std::to_string(existing_slot));
+          return existing_slot;
+        }
+
+        // A different new client reserved this formerly-idle slot between the capacity check
+        // and allocation. Drop this stale mapping and search for another slot.
+        g_client_slots.erase(it);
       }
     }
 
     // Otherwise, claim the lowest-numbered slot that isn't currently live under a *different*
     // client's active session.
     for (int candidate = 2; candidate <= 4; ++candidate) {
-      bool taken = false;
-      for (const auto &entry : g_client_slots) {
-        if (entry.second == candidate && g_connected_players.count(candidate)) {
-          taken = true;
-          break;
+      const bool taken = g_connected_players.count(candidate) != 0;
+      if (!taken && !g_pending_slot_owners.count(candidate)) {
+        // Reusing a free slot invalidates any old sticky reservation for that slot. Without
+        // this cleanup, a disconnected client could later reclaim a slot now occupied by a
+        // different live client and both would be routed as the same player.
+        for (auto it = g_client_slots.begin(); it != g_client_slots.end();) {
+          if (it->second == candidate) {
+            it = g_client_slots.erase(it);
+          } else {
+            ++it;
+          }
         }
-      }
-      if (!taken) {
+
         if (!client_address.empty()) {
           g_client_slots[client_address] = candidate;
         }
+        g_pending_slot_owners[candidate] = client_address;
         debug_log("assign_player_slot(\"" + client_address + "\"): NEW assignment, slot " + std::to_string(candidate));
         return candidate;
       }
     }
 
-    // More than three distinct clients are simultaneously active - no free slot to hand out.
-    // Fall back to plain round-robin so something is still assigned, even at the risk of a
-    // collision, rather than leaving the client completely untagged.
-    static std::atomic<int> overflow_counter {0};
-    int overflow_slot = (overflow_counter.fetch_add(1) % 3) + 2;
-    debug_log("assign_player_slot(\"" + client_address + "\"): OVERFLOW (3 slots all live), collision-risk slot " + std::to_string(overflow_slot));
-    return overflow_slot;
+    // The launch/resume gate should reject this before input allocation. If two requests race,
+    // fail closed here rather than assigning a duplicate slot and allowing control bleed.
+    debug_log("assign_player_slot(\"" + client_address + "\"): NO FREE SLOT");
+    return 0;
   }
 
   bool has_free_player_slot(const std::string &client_address) {
@@ -383,19 +478,19 @@ namespace teknoparrot_pipe {
 
     // Already holds a sticky slot from an earlier session - not a new occupant, so it always
     // has "a slot" regardless of how full the other three are.
-    if (!client_address.empty() && g_client_slots.count(client_address)) {
-      return true;
+    if (!client_address.empty()) {
+      auto client_it = g_client_slots.find(client_address);
+      if (client_it != g_client_slots.end()) {
+        auto pending_it = g_pending_slot_owners.find(client_it->second);
+        if (pending_it == g_pending_slot_owners.end() || pending_it->second == client_address) {
+          return true;
+        }
+      }
     }
 
     for (int candidate = 2; candidate <= 4; ++candidate) {
-      bool taken = false;
-      for (const auto &entry : g_client_slots) {
-        if (entry.second == candidate && g_connected_players.count(candidate)) {
-          taken = true;
-          break;
-        }
-      }
-      if (!taken) {
+      const bool taken = g_connected_players.count(candidate) != 0;
+      if (!taken && !g_pending_slot_owners.count(candidate)) {
         return true;
       }
     }

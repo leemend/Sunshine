@@ -2106,30 +2106,28 @@ namespace stream {
     }
 
     int start(session_t &session, const std::string &addr_string) {
-      // Prefer the client's persistent Moonlight uniqueid (stable regardless of IP changes,
-      // NAT, or multiple devices sharing one public IP when connecting over the internet) for
-      // the TeknoParrot identity bridge. Some clients don't send one, in which case Moonlight's
-      // protocol default is the literal string "unknown" - fall back to the connection's IP
-      // address in that case so such clients don't all collide onto the same identity.
-      // Prefer the client's persistent Moonlight uniqueid (stable regardless of IP changes,
-      // NAT, or multiple devices sharing one public IP when connecting over the internet) for
-      // the TeknoParrot identity bridge. Some clients don't send one, in which case Moonlight's
-      // protocol default is the literal string "unknown" - fall back to the connection's IP
-      // address in that case so such clients don't all collide onto the same identity.
-      // Confirmed via testing that some client implementations *do* send a non-empty uniqueid
-      // that still isn't actually unique - "0123456789ABCDEF" is a known sequential placeholder
-      // several Moonlight-based clients fall back to - so treat that the same way as "unknown".
+      // Prefer Sunshine's authenticated paired-client UUID. It is stable and unique per pairing,
+      // so it avoids both address changes and Moonlight installations that report a shared
+      // placeholder uniqueid. Fall back to Moonlight's uniqueid, then the peer address, for
+      // clients where the paired UUID could not be resolved.
       const bool has_real_unique_id = !session.client_unique_id.empty() &&
                                        session.client_unique_id != "unknown" &&
                                        session.client_unique_id != "0123456789ABCDEF";
-      const auto &client_identity = has_real_unique_id ? session.client_unique_id : addr_string;
+      const auto &client_identity = !session.client_uuid.empty() ?
+                                      session.client_uuid :
+                                      (has_real_unique_id ? session.client_unique_id : addr_string);
 #ifdef _WIN32
       teknoparrot_pipe::debug_log(
-        "Client identity resolution: unique_id=[" + session.client_unique_id + "] addr_string=[" + addr_string +
+        "Client identity resolution: paired_uuid=[" + session.client_uuid + "] unique_id=[" +
+        session.client_unique_id + "] addr_string=[" + addr_string +
         "] -> using [" + client_identity + "]"
       );
 #endif
-      session.input = input::alloc(session.mail, client_identity);
+      session.input = input::alloc(
+        session.mail,
+        client_identity,
+        session.client_uuid
+      );
 
       session.broadcast_ref = broadcast.ref();
       if (!session.broadcast_ref) {

@@ -27,14 +27,18 @@ namespace input {
    * @brief Allocate and initialize platform input state for a stream.
    *
    * @param mail Mailbox used to exchange messages with worker threads.
-   * @param client_address The connecting client's address, used as a stable identifier so the
-   * TeknoParrot identity bridge (Windows only) can give the same client the same player number
-   * across session restarts - navigating a client-side settings screen, or the app renegotiating
-   * the stream, tears down and recreates this session (and would otherwise silently reassign a
-   * new player number) without the client ever actually disconnecting.
+   * @param client_identity Stable Moonlight client identity used by the TeknoParrot bridge
+   * for sticky P2-P4 player-slot assignment across stream/session recreation.
+   * @param client_uuid Sunshine's persistent paired-client UUID. This follows the saved
+   * Sunshine pairing and is forwarded to TeknoParrotUI so per-client settings can persist
+   * independently of whichever P2-P4 slot the client receives on a particular session.
    * @return Shared input state bound to the stream mailbox.
    */
-  std::shared_ptr<input_t> alloc(safe::mail_t mail, const std::string &client_address = {});
+  std::shared_ptr<input_t> alloc(
+    safe::mail_t mail,
+    const std::string &client_identity = {},
+    const std::string &client_uuid = {}
+  );
 
   struct touch_port_t: public platf::touch_port_t {
     int env_width;
@@ -62,23 +66,20 @@ namespace input {
    * @param scalar The scalar cartesian coordinate pair.
    * @return The major and minor axis pair.
    */
-  std::pair<float, float> scale_client_contact_area(const std::pair<float, float> &val, uint16_t rotation, const std::pair<float, float> &scalar);
+  std::pair<float, float> scale_client_contact_area(
+    const std::pair<float, float> &val,
+    uint16_t rotation,
+    const std::pair<float, float> &scalar
+  );
 
   /**
-   * @brief Records which client session (2-4, or 0 if unassigned) is the source of the mouse/keyboard event
-   * about to be forwarded to the platform backend.
-   * @details SendInput()-based injection on Windows carries no per-client identity, so this
-   * lets src/input.cpp tag the currently-processing session immediately before calling into
-   * platf::*, and src/platform/windows/input.cpp read it back out when forwarding events to
-   * the TeknoParrot bridge pipe. 0 means "unassigned / not a tracked player".
-   * @param player_index The player slot (2-4) assigned to the client session, or 0 if unassigned.
+   * @brief Records which client session (2-4, or 0 if unassigned) is the source of the
+   * mouse/keyboard event about to be forwarded to the platform backend.
    */
   void set_active_player(int player_index);
 
   /**
-   * @brief Retrieves the player slot set by the most recent set_active_player() call on this
-   * thread.
-   * @return The player slot (2-4), or 0 if unassigned.
+   * @brief Retrieves the player slot set by the most recent set_active_player() call.
    */
   int get_active_player();
 }  // namespace input

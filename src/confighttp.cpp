@@ -1768,8 +1768,30 @@ namespace confighttp {
         return;
       }
 
+      // Unpairing a client from the managed TeknoParrot UI should also
+      // terminate any active stream(s) owned by that paired client.
+      // This mirrors Sunshine's existing tray "Disconnect & Unpair" behavior.
+      std::size_t disconnected_sessions = 0;
+      for (const auto &session : rtsp_stream::active_sessions()) {
+        if (session.client_uuid != uuid) {
+          continue;
+        }
+
+        if (rtsp_stream::terminate_session(session.id)) {
+          ++disconnected_sessions;
+          BOOST_LOG(info) << "ManagedUnpair: disconnected session "
+                          << session.id << " for client " << uuid;
+        } else {
+          BOOST_LOG(warning) << "ManagedUnpair: failed to disconnect session "
+                             << session.id << " for client " << uuid;
+        }
+      }
+
+      const bool unpaired = nvhttp::unpair_client(uuid);
+
       nlohmann::json output_tree;
-      output_tree["status"] = nvhttp::unpair_client(uuid);
+      output_tree["status"] = unpaired;
+      output_tree["disconnected_sessions"] = disconnected_sessions;
       send_response(response, output_tree);
     } catch (const std::exception &e) {
       BOOST_LOG(warning) << "ManagedUnpair: "sv << e.what();

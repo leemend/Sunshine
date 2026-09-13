@@ -71,6 +71,24 @@ namespace input {
     return active_player_index;
   }
 
+  class active_player_scope_t {
+  public:
+    explicit active_player_scope_t(int player_index):
+        previous_player_index {active_player_index} {
+      active_player_index = player_index;
+    }
+
+    ~active_player_scope_t() {
+      active_player_index = previous_player_index;
+    }
+
+    active_player_scope_t(const active_player_scope_t &) = delete;
+    active_player_scope_t &operator=(const active_player_scope_t &) = delete;
+
+  private:
+    int previous_player_index;
+  };
+
   constexpr auto VKEY_RMENU = 0xA5;
 
   enum class button_state_e {
@@ -474,7 +492,7 @@ namespace input {
     }
 
     input->mouse_left_button_timeout = DISABLE_LEFT_BUTTON_DELAY;
-    set_active_player(input->player_index);
+    active_player_scope_t active_player_scope {input->player_index};
     platf::move_mouse(platf_input, util::endian::big(packet->deltaX), util::endian::big(packet->deltaY));
   }
 
@@ -616,7 +634,7 @@ namespace input {
       touch_port_dim_y
     };
 
-    set_active_player(input->player_index);
+    active_player_scope_t active_player_scope {input->player_index};
     platf::abs_mouse(platf_input, abs_port, tpcoords->first, tpcoords->second);
   }
 
@@ -656,7 +674,7 @@ namespace input {
           // Already released left button
           return;
         }
-        set_active_player(input->player_index);
+        active_player_scope_t active_player_scope {input->player_index};
         platf::button_mouse(platf_input, BUTTON_LEFT, release);
 
         mouse_press[BUTTON_LEFT] = false;
@@ -671,7 +689,7 @@ namespace input {
       button == BUTTON_RIGHT && !release &&
       input->mouse_left_button_timeout > DISABLE_LEFT_BUTTON_DELAY
     ) {
-      set_active_player(input->player_index);
+      active_player_scope_t active_player_scope {input->player_index};
       platf::button_mouse(platf_input, BUTTON_RIGHT, false);
       platf::button_mouse(platf_input, BUTTON_RIGHT, true);
 
@@ -680,7 +698,7 @@ namespace input {
       return;
     }
 
-    set_active_player(input->player_index);
+    active_player_scope_t active_player_scope {input->player_index};
     platf::button_mouse(platf_input, button, release);
   }
 
@@ -746,7 +764,7 @@ namespace input {
   }
 
   void send_key_and_modifiers(uint16_t key_code, bool release, uint8_t flags, uint8_t synthetic_modifiers, int player_index) {
-    set_active_player(player_index);
+    active_player_scope_t active_player_scope {player_index};
 
     if (!release) {
       // Press any synthetic modifiers required for this key
@@ -854,7 +872,7 @@ namespace input {
       return;
     }
 
-    set_active_player(input->player_index);
+    active_player_scope_t active_player_scope {input->player_index};
     if (config::input.high_resolution_scrolling) {
       platf::scroll(platf_input, util::endian::big(packet->scrollAmt1));
     } else {
@@ -878,7 +896,7 @@ namespace input {
       return;
     }
 
-    set_active_player(input->player_index);
+    active_player_scope_t active_player_scope {input->player_index};
     if (config::input.high_resolution_scrolling) {
       platf::hscroll(platf_input, util::endian::big(packet->scrollAmount));
     } else {
@@ -935,7 +953,7 @@ namespace input {
     // So the Windows backend can associate the resulting ViGEm allocation (and the real
     // XInput user index it gets assigned) with the player who requested it, for forwarding
     // to TeknoParrotUI - see teknoparrot_pipe::send_gamepad_slot().
-    set_active_player(input->player_index);
+    active_player_scope_t active_player_scope {input->player_index};
 
     // Allocate a new gamepad
     if (platf::alloc_gamepad(platf_input, {id, packet->controllerNumber}, arrival, input->feedback_queue)) {
@@ -1764,15 +1782,22 @@ namespace input {
     return true;
   }
 
-  std::shared_ptr<input_t> alloc(safe::mail_t mail, const std::string &client_address) {
+  std::shared_ptr<input_t> alloc(
+    safe::mail_t mail,
+    const std::string &client_identity,
+    const std::string &client_uuid
+  ) {
     auto input = std::make_shared<input_t>(
       mail->event<input::touch_port_t>(mail::touch_port),
       mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback)
     );
 
 #ifdef _WIN32
-    input->player_index = teknoparrot_pipe::assign_player_slot(client_address);
-    teknoparrot_pipe::send_roster(input->player_index, true);
+    input->player_index = teknoparrot_pipe::assign_player_slot(client_identity);
+    if (input->player_index >= 2 && input->player_index <= 4) {
+      teknoparrot_pipe::send_roster(input->player_index, true);
+      teknoparrot_pipe::send_client_identity(input->player_index, client_uuid);
+    }
 #endif
 
     // Workaround to ensure new frames will be captured when a client connects

@@ -9,6 +9,7 @@
     #define WIN32_LEAN_AND_MEAN
     #include <accctrl.h>
     #include <aclapi.h>
+    #include <windows.h>
     #define TRAY_ICON WEB_DIR "images/sunshine.ico"
     #define TRAY_ICON_PLAYING WEB_DIR "images/sunshine-playing.ico"
     #define TRAY_ICON_PAUSING WEB_DIR "images/sunshine-pausing.ico"
@@ -34,6 +35,7 @@
   #include <chrono>
   #include <csignal>
   #include <cstdint>
+  #include <cstring>
   #include <format>
   #include <string>
   #include <thread>
@@ -68,6 +70,7 @@ namespace system_tray {
   static std::vector<tray_menu> disconnect_menu_items;
   static std::vector<std::string> connectivity_menu_labels;
   static std::vector<tray_menu> connectivity_menu_items;
+  static std::string connectivity_public_ip;
   static std::vector<std::string> connectivity_advanced_labels;
   static std::vector<tray_menu> connectivity_advanced_items;
   static std::atomic_bool manual_connectivity_test_pending = false;
@@ -192,10 +195,13 @@ namespace system_tray {
   }
 
   void tray_refresh_connectivity_cb(struct tray_menu *item);
+  void tray_copy_public_ip_cb(struct tray_menu *item);
 
   void rebuild_connectivity_diagnostics_menu() {
     const auto diagnostics = upnp::get_diagnostics();
     const bool active_stream = !rtsp_stream::active_sessions().empty();
+
+    connectivity_public_ip = diagnostics.external_address;
 
     const bool all_mappings_ok =
       !diagnostics.mappings.empty() &&
@@ -355,12 +361,19 @@ namespace system_tray {
     new_advanced_items.push_back({.text = nullptr});
 
     std::vector<tray_menu> new_items;
-    new_items.reserve(new_labels.size() + 3);
+    new_items.reserve(new_labels.size() + 4);
 
     for (const auto &label : new_labels) {
       new_items.push_back({
         .text = label.c_str(),
         .disabled = 1,
+      });
+    }
+
+    if (!connectivity_public_ip.empty()) {
+      new_items.push_back({
+        .text = "Copy Public IP",
+        .cb = tray_copy_public_ip_cb,
       });
     }
 
@@ -383,6 +396,65 @@ namespace system_tray {
     connectivity_menu_items.swap(new_items);
     connectivity_advanced_labels.swap(new_advanced_labels);
     connectivity_advanced_items.swap(new_advanced_items);
+  }
+
+  void tray_copy_public_ip_cb([[maybe_unused]] struct tray_menu *item) {
+#if defined(_WIN32)
+    if (connectivity_public_ip.empty()) {
+      BOOST_LOG(warning) << "Unable to copy public IP: no public IP is currently available"sv;
+      return;
+    }
+
+    if (!OpenClipboard(nullptr)) {
+      BOOST_LOG(warning) << "Unable to open Windows clipboard for public IP copy"sv;
+      return;
+    }
+
+    if (!EmptyClipboard()) {
+      BOOST_LOG(warning) << "Unable to clear Windows clipboard for public IP copy"sv;
+      CloseClipboard();
+      return;
+    }
+
+    const auto byte_count = connectivity_public_ip.size() + 1;
+
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, byte_count);
+    if (!memory) {
+      BOOST_LOG(warning) << "Unable to allocate clipboard memory for public IP"sv;
+      CloseClipboard();
+      return;
+    }
+
+    void *destination = GlobalLock(memory);
+    if (!destination) {
+      BOOST_LOG(warning) << "Unable to lock clipboard memory for public IP"sv;
+      GlobalFree(memory);
+      CloseClipboard();
+      return;
+    }
+
+    std::memcpy(
+      destination,
+      connectivity_public_ip.c_str(),
+      byte_count
+    );
+
+    GlobalUnlock(memory);
+
+    if (!SetClipboardData(CF_TEXT, memory)) {
+      BOOST_LOG(warning) << "Unable to place public IP onto Windows clipboard"sv;
+      GlobalFree(memory);
+      CloseClipboard();
+      return;
+    }
+
+    // Windows owns the memory after a successful SetClipboardData().
+    CloseClipboard();
+
+    BOOST_LOG(info) << "Copied public IP to clipboard: " << connectivity_public_ip;
+#else
+    BOOST_LOG(warning) << "Copy Public IP is only supported on Windows"sv;
+#endif
   }
 
   void tray_open_ui_cb([[maybe_unused]] struct tray_menu *item) {
